@@ -22,6 +22,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "url": url,
                 "title": "Учебная страница",
                 "text": "Меню сайта Добро пожаловать Этот HTML используется в тестах парсера.",
+                "links": [],
                 "metadata": {
                     "title": "Учебная страница",
                     "description": "Пример для краулера",
@@ -42,6 +43,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "url": url,
                 "title": "",
                 "text": "",
+                "links": [],
                 "metadata": {"title": "", "description": "", "keywords": "python"},
             },
         )
@@ -61,3 +63,32 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
         for selector in ("#missing", "script", "style"):
             with self.subTest(selector=selector):
                 self.assertEqual(parser.extract_text(soup, selector=selector), "")
+
+    async def test_parse_html_resolves_links_using_the_html_base(self) -> None:
+        html = PAGE_FIXTURE.with_name("links.html").read_text(encoding="utf-8")
+        url = "https://example.com/blog/posts/current.html"
+
+        page = await HTMLParser().parse_html(html, url)
+
+        self.assertEqual(
+            page["links"],
+            [
+                "https://example.com/blog/guide/intro.html",
+                "https://example.com/blog/index.html",
+                "https://docs.example.org/start",
+                "https://cdn.example.org/help",
+            ],
+        )
+
+    def test_extract_links_falls_back_to_page_url_for_missing_or_invalid_base(self) -> None:
+        parser = HTMLParser()
+        page_url = "https://example.com/blog/posts/current.html"
+
+        for base in ("", '<base href="mailto:hello@example.com">'):
+            with self.subTest(base=base):
+                html = f'<head>{base}</head><body><a href="../guide.html">Guide</a></body>'
+                soup = BeautifulSoup(html, "lxml")
+                self.assertEqual(
+                    parser.extract_links(soup, page_url),
+                    ["https://example.com/blog/guide.html"],
+                )
