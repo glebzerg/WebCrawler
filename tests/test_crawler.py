@@ -1,7 +1,8 @@
+import asyncio
 import socket
 import unittest
 
-from aiohttp import ClientConnectorError, ClientResponseError
+from aiohttp import ClientConnectorError, ClientResponseError, SocketTimeoutError, web
 
 from crawler import AsyncCrawler, FetchConnectionError
 from tests.http_server import make_test_server
@@ -80,3 +81,41 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         cause = raised.exception.__cause__
         self.assertIsInstance(cause, ClientConnectorError)
         self.assertIsInstance(cause.os_error, ConnectionRefusedError)
+
+    async def test_session_uses_configured_connection_and_read_timeouts(self) -> None:
+        crawler = AsyncCrawler(connect_timeout=2.0, read_timeout=3.0)
+        self.addAsyncCleanup(crawler.close)
+
+        session = crawler._get_session()
+
+        self.assertEqual(session.timeout.connect, 2.0)
+        self.assertEqual(session.timeout.sock_read, 3.0)
+
+    async def test_fetch_url_times_out_on_stalled_body_and_can_fetch_again(self) -> None:
+        body_started = asyncio.Event()
+        release_body = asyncio.Event()
+
+        async def stalled_body(request: web.Request) -> web.StreamResponse:
+            response = web.StreamResponse()
+            await response.prepare(request)
+            await response.write(b"First part of the body")
+            body_started.set()
+            await release_body.wait()
+            return response
+
+        crawler = AsyncCrawler(connect_timeout=2.0, read_timeout=0.25)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/stalled-body", stalled_body)
+
+        async with server:
+            try:
+                with self.assertRaises(SocketTimeoutError):
+                    await crawler.fetch_url(str(server.make_url("/stalled-body")))
+                self.assertTrue(body_started.is_set())
+            finally:
+                release_body.set()
+
+            text = await crawler.fetch_url(str(server.make_url("/ok")))
+
+        self.assertEqual(text, "Hello from the test server")

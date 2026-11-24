@@ -1,4 +1,4 @@
-from aiohttp import ClientConnectionError, ClientConnectorError, ClientSession
+from aiohttp import ClientConnectionError, ClientConnectorError, ClientSession, ClientTimeout
 
 
 class FetchConnectionError(ClientConnectionError):
@@ -8,7 +8,12 @@ class FetchConnectionError(ClientConnectionError):
 
 
 class AsyncCrawler:
-    def __init__(self) -> None:
+    def __init__(self, *, connect_timeout: float = 5.0, read_timeout: float = 10.0) -> None:
+        self._timeout = ClientTimeout(
+            total=5 * 60,
+            connect=connect_timeout,
+            sock_read=read_timeout,
+        )
         self._session: ClientSession | None = None
         self._closed = False
 
@@ -17,7 +22,7 @@ class AsyncCrawler:
             raise RuntimeError("AsyncCrawler is closed")
 
         if self._session is None:
-            self._session = ClientSession()
+            self._session = ClientSession(timeout=self._timeout)
         return self._session
 
     async def fetch_url(self, url: str) -> str:
