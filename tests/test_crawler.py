@@ -1,6 +1,7 @@
 import unittest
 
 from crawler import AsyncCrawler
+from tests.http_server import make_test_server
 
 
 class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
@@ -27,3 +28,21 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "AsyncCrawler is closed"):
             crawler._get_session()
+
+    async def test_fetch_url_returns_response_text(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            text = await crawler.fetch_url(str(server.make_url("/ok")))
+
+        self.assertEqual(text, "Hello from the test server")
+
+    async def test_fetch_url_returns_empty_string_for_empty_body(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            text = await crawler.fetch_url(str(server.make_url("/empty")))
+
+        self.assertEqual(text, "")

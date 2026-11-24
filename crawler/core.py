@@ -14,6 +14,11 @@ class AsyncCrawler:
             self._session = ClientSession()
         return self._session
 
+    async def fetch_url(self, url: str) -> str:
+        session = self._get_session()
+        async with session.get(url) as response:
+            return await response.text()
+
     async def close(self) -> None:
         self._closed = True
         if self._session is not None:
