@@ -1,6 +1,9 @@
+import socket
 import unittest
 
-from crawler import AsyncCrawler
+from aiohttp import ClientConnectorError, ClientResponseError
+
+from crawler import AsyncCrawler, FetchConnectionError
 from tests.http_server import make_test_server
 
 
@@ -46,3 +49,34 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             text = await crawler.fetch_url(str(server.make_url("/empty")))
 
         self.assertEqual(text, "")
+
+    async def test_fetch_url_raises_http_error_with_status_and_url(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            for path, status in (("/missing", 404), ("/server-error", 500)):
+                with self.subTest(status=status):
+                    url = server.make_url(path)
+                    with self.assertRaises(ClientResponseError) as raised:
+                        await crawler.fetch_url(str(url))
+
+                    self.assertEqual(raised.exception.status, status)
+                    self.assertEqual(raised.exception.request_info.real_url, url)
+
+    async def test_fetch_url_preserves_connection_failure_url_and_cause(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        with socket.socket() as reserved_port:
+            reserved_port.bind(("127.0.0.1", 0))
+            port = reserved_port.getsockname()[1]
+            url = f"http://127.0.0.1:{port}/ok"
+
+            with self.assertRaises(FetchConnectionError) as raised:
+                await crawler.fetch_url(url)
+
+        self.assertEqual(raised.exception.url, url)
+        cause = raised.exception.__cause__
+        self.assertIsInstance(cause, ClientConnectorError)
+        self.assertIsInstance(cause.os_error, ConnectionRefusedError)

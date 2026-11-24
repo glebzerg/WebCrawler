@@ -1,3 +1,3 @@
-from .core import AsyncCrawler
+from .core import AsyncCrawler, FetchConnectionError
 
-__all__ = ["AsyncCrawler"]
+__all__ = ["AsyncCrawler", "FetchConnectionError"]
