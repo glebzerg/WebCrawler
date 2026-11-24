@@ -9,6 +9,8 @@ from aiohttp import (
     ClientTimeout,
 )
 
+from .html_parser import HTMLParser, ParsedPage
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +50,16 @@ class AsyncCrawler:
         return self._session
 
     async def fetch_url(self, url: str) -> str:
+        text, _ = await self._fetch_page(url)
+        return text
+
+    async def fetch_and_parse(self, url: str) -> ParsedPage:
+        html, final_url = await self._fetch_page(url)
+        page = await HTMLParser().parse_html(html, final_url)
+        page["url"] = url
+        return page
+
+    async def _fetch_page(self, url: str) -> tuple[str, str]:
         async with self._request_slots:
             session = self._get_session()
             logger.info(
@@ -59,6 +71,7 @@ class AsyncCrawler:
                 async with session.get(url) as response:
                     response.raise_for_status()
                     text = await response.text()
+                    final_url = str(response.url)
             except Exception as error:
                 error_type = type(error).__name__
                 logger.warning(
@@ -76,7 +89,7 @@ class AsyncCrawler:
                 url,
                 extra={"event": "fetch_succeeded", "url": url},
             )
-            return text
+            return text, final_url
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Fetch each unique URL and record failures for the completed batch."""

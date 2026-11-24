@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import TypedDict
@@ -88,6 +89,9 @@ def _extract_field[T](url: str, field: str, extract: Callable[[], T], default: T
 
 class HTMLParser:
     async def parse_html(self, html: str, url: str) -> ParsedPage:
+        return await asyncio.to_thread(self._parse_html, html, url)
+
+    def _parse_html(self, html: str, url: str) -> ParsedPage:
         try:
             soup = BeautifulSoup(html, "lxml")
         except ParserRejectedMarkup as error:

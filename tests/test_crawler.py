@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -11,7 +12,8 @@ from aiohttp import (
     web,
 )
 
-from crawler import AsyncCrawler, FetchConnectionError
+from crawler import AsyncCrawler, FetchConnectionError, HTMLParser
+from crawler.html_parser import ParsedPage
 from tests.http_server import make_test_server
 
 
@@ -81,6 +83,63 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             text = await crawler.fetch_url(str(server.make_url("/empty")))
 
         self.assertEqual(text, "")
+
+    async def test_fetch_and_parse_uses_final_url_for_relative_links(self) -> None:
+        async def redirect(_request: web.Request) -> web.Response:
+            raise web.HTTPFound("/docs/page.html")
+
+        async def final_page(_request: web.Request) -> web.Response:
+            return web.Response(
+                text='<title>Docs</title><a href="next.html">Next</a>',
+                content_type="text/html",
+            )
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/start", redirect)
+        server.app.router.add_get("/docs/page.html", final_page)
+
+        async with server:
+            original_url = str(server.make_url("/start"))
+            expected_link = str(server.make_url("/docs/next.html"))
+            page = await crawler.fetch_and_parse(original_url)
+
+        self.assertEqual(page["url"], original_url)
+        self.assertEqual(page["title"], "Docs")
+        self.assertEqual(page["links"], [expected_link])
+
+    async def test_another_request_can_finish_while_html_is_being_parsed(self) -> None:
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+        parsing_started = asyncio.Event()
+        resume_parsing = threading.Event()
+        original_parse = HTMLParser._parse_html
+
+        def paused_parse(parser: HTMLParser, html: str, url: str) -> ParsedPage:
+            if threading.get_ident() == loop_thread:
+                raise AssertionError("HTML parsing ran in the event loop thread")
+            loop.call_soon_threadsafe(parsing_started.set)
+            if not resume_parsing.wait(timeout=5):
+                raise TimeoutError("The parsing test did not release its worker")
+            return original_parse(parser, html, url)
+
+        crawler = AsyncCrawler(max_concurrent=1)
+        self.addAsyncCleanup(crawler.close)
+        async with make_test_server() as server:
+            url = str(server.make_url("/ok"))
+            with patch.object(HTMLParser, "_parse_html", paused_parse):
+                parse_task = asyncio.create_task(crawler.fetch_and_parse(url))
+                try:
+                    await asyncio.wait_for(parsing_started.wait(), timeout=5)
+                    text = await asyncio.wait_for(crawler.fetch_url(url), timeout=5)
+                    self.assertFalse(parse_task.done())
+                finally:
+                    resume_parsing.set()
+                    page = await asyncio.wait_for(parse_task, timeout=5)
+
+        self.assertEqual(text, "Hello from the test server")
+        self.assertEqual(page["text"], text)
 
     async def test_fetch_url_raises_http_error_with_status_and_url(self) -> None:
         crawler = AsyncCrawler()
