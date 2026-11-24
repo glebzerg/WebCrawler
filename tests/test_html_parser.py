@@ -24,6 +24,8 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "text": "Меню сайта Добро пожаловать Этот HTML используется в тестах парсера.",
                 "links": [],
                 "images": [],
+                "headings": [{"level": 1, "text": "Добро пожаловать"}],
+                "lists": [],
                 "metadata": {
                     "title": "Учебная страница",
                     "description": "Пример для краулера",
@@ -46,6 +48,8 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "text": "",
                 "links": [],
                 "images": [],
+                "headings": [],
+                "lists": [],
                 "metadata": {"title": "", "description": "", "keywords": "python"},
             },
         )
@@ -115,5 +119,43 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
             [
                 {"src": "https://example.com/blog/media/cover.png", "alt": "Обложка"},
                 {"src": "https://cdn.example.org/logo.svg", "alt": ""},
+            ],
+        )
+
+    async def test_parse_html_keeps_heading_levels_and_list_order(self) -> None:
+        html = """
+            <h2>Подготовка</h2>
+            <ul>
+                <li>Открыть <strong>терминал</strong></li>
+                <li>Установить пакеты
+                    <ol><li>aiohttp</li><li>lxml</li></ol>
+                    и проверить импорты
+                </li>
+            </ul>
+            <h1>Запуск</h1>
+            <h3>Порядок действий</h3>
+            <ol><li>Запустить пример</li><li>Прочитать результат</li></ol>
+            <h4>Дополнение</h4>
+        """
+
+        page = await HTMLParser().parse_html(html, "https://example.com/structure")
+
+        self.assertEqual(
+            page["headings"],
+            [
+                {"level": 2, "text": "Подготовка"},
+                {"level": 1, "text": "Запуск"},
+                {"level": 3, "text": "Порядок действий"},
+            ],
+        )
+        self.assertEqual(
+            page["lists"],
+            [
+                {
+                    "type": "ul",
+                    "items": ["Открыть терминал", "Установить пакеты и проверить импорты"],
+                },
+                {"type": "ol", "items": ["aiohttp", "lxml"]},
+                {"type": "ol", "items": ["Запустить пример", "Прочитать результат"]},
             ],
         )

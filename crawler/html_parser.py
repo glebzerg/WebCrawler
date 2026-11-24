@@ -1,6 +1,18 @@
+from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
+
+
+class ParsedPage(TypedDict):
+    url: str
+    title: str
+    text: str
+    links: list[str]
+    images: list[dict[str, str]]
+    headings: list[dict[str, int | str]]
+    lists: list[dict[str, str | list[str]]]
+    metadata: dict[str, str]
 
 
 def _resolve_http_url(base_url: str, reference: str) -> str | None:
@@ -38,9 +50,7 @@ def _document_base_url(soup: BeautifulSoup, page_url: str) -> str:
 
 
 class HTMLParser:
-    async def parse_html(
-        self, html: str, url: str
-    ) -> dict[str, str | list[str] | list[dict[str, str]] | dict[str, str]]:
+    async def parse_html(self, html: str, url: str) -> ParsedPage:
         soup = BeautifulSoup(html, "lxml")
         metadata = self.extract_metadata(soup)
         return {
@@ -49,6 +59,8 @@ class HTMLParser:
             "text": self.extract_text(soup),
             "links": self.extract_links(soup, url),
             "images": self.extract_images(soup, url),
+            "headings": self.extract_headings(soup),
+            "lists": self.extract_lists(soup),
             "metadata": metadata,
         }
 
@@ -77,6 +89,26 @@ class HTMLParser:
             alt = image.get("alt")
             images.append({"src": url, "alt": alt if isinstance(alt, str) else ""})
         return images
+
+    def extract_headings(self, soup: BeautifulSoup) -> list[dict[str, int | str]]:
+        return [
+            {"level": int(heading.name[1]), "text": heading.get_text(" ", strip=True)}
+            for heading in soup.select("h1, h2, h3")
+        ]
+
+    def extract_lists(self, soup: BeautifulSoup) -> list[dict[str, str | list[str]]]:
+        lists = []
+        for list_tag in soup.select("ul, ol"):
+            items = []
+            for item in list_tag.find_all("li", recursive=False):
+                parts = (
+                    text.strip()
+                    for text in item.strings
+                    if text.find_parent(("ul", "ol")) is list_tag
+                )
+                items.append(" ".join(filter(None, parts)))
+            lists.append({"type": list_tag.name, "items": items})
+        return lists
 
     def extract_text(self, soup: BeautifulSoup, selector: str | None = None) -> str:
         section = soup.body if selector is None else soup.select_one(selector)
