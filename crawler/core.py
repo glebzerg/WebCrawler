@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from aiohttp import (
     ClientConnectionError,
@@ -7,6 +8,8 @@ from aiohttp import (
     ClientSession,
     ClientTimeout,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class FetchConnectionError(ClientConnectionError):
@@ -47,12 +50,33 @@ class AsyncCrawler:
     async def fetch_url(self, url: str) -> str:
         async with self._request_slots:
             session = self._get_session()
+            logger.info(
+                "Started fetching %s",
+                url,
+                extra={"event": "fetch_started", "url": url},
+            )
             try:
                 async with session.get(url) as response:
                     response.raise_for_status()
-                    return await response.text()
-            except ClientConnectorError as error:
-                raise FetchConnectionError(url) from error
+                    text = await response.text()
+            except Exception as error:
+                error_type = type(error).__name__
+                logger.warning(
+                    "Failed to fetch %s (%s)",
+                    url,
+                    error_type,
+                    extra={"event": "fetch_failed", "url": url, "error_type": error_type},
+                )
+                if isinstance(error, ClientConnectorError):
+                    raise FetchConnectionError(url) from error
+                raise
+
+            logger.info(
+                "Finished fetching %s",
+                url,
+                extra={"event": "fetch_succeeded", "url": url},
+            )
+            return text
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Fetch each unique URL and record failures for the completed batch."""

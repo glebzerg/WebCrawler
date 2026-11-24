@@ -49,6 +49,30 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "Hello from the test server")
 
+    async def test_fetch_url_logs_started_and_final_events(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            ok_url = str(server.make_url("/ok"))
+            missing_url = str(server.make_url("/missing"))
+            with self.assertLogs("crawler.core", level="INFO") as captured:
+                await crawler.fetch_url(ok_url)
+                with self.assertRaises(ClientResponseError):
+                    await crawler.fetch_url(missing_url)
+
+        events = [(record.event, record.url, record.levelname) for record in captured.records]
+        self.assertEqual(
+            events,
+            [
+                ("fetch_started", ok_url, "INFO"),
+                ("fetch_succeeded", ok_url, "INFO"),
+                ("fetch_started", missing_url, "INFO"),
+                ("fetch_failed", missing_url, "WARNING"),
+            ],
+        )
+        self.assertEqual(captured.records[-1].error_type, "ClientResponseError")
+
     async def test_fetch_url_returns_empty_string_for_empty_body(self) -> None:
         crawler = AsyncCrawler()
         self.addAsyncCleanup(crawler.close)
