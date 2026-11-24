@@ -19,15 +19,15 @@ py -3.12 -m venv .venv
 
 `.venv` хранит окружение этого проекта. Команда `python.exe -m pip` запускает pip через тот же интерпретатор, которым мы будем запускать проект. Прямой путь к `python.exe` внутри `.venv` позволяет работать без активации окружения.
 
-`requirements.txt` перечисляет две прямые зависимости первого этапа. `aiohttp` будет отправлять HTTP-запросы, а `aiofiles` пригодится для асинхронной работы с файлами.
+`requirements.txt` перечисляет зависимости проекта. `aiohttp` отправляет HTTP-запросы, BeautifulSoup4 и lxml разбирают HTML, а `aiofiles` пригодится для асинхронной работы с файлами.
 
 ## Проверка установки
 
 ```powershell
-.\.venv\Scripts\python.exe -c "import sys, aiohttp, aiofiles; print(sys.version.split()[0]); print(sys.executable); print('aiohttp and aiofiles OK')"
+.\.venv\Scripts\python.exe -c "import sys, aiohttp, aiofiles, bs4, lxml; print(sys.version.split()[0]); print(sys.executable); print('All project dependencies imported')"
 ```
 
-Первая строка показывает версию Python, вторая — путь к запущенному интерпретатору внутри `.venv`. Последняя строка появляется после успешного импорта обеих библиотек.
+Первая строка показывает версию Python, вторая — путь к запущенному интерпретатору внутри `.venv`. Последняя строка появляется после успешного импорта всех библиотек.
 
 ## Локальные тесты
 
