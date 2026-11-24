@@ -1,7 +1,13 @@
+import logging
+from collections.abc import Callable
 from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
+from bs4.exceptions import ParserRejectedMarkup
+
+
+logger = logging.getLogger(__name__)
 
 
 class ParsedPage(TypedDict):
@@ -61,19 +67,48 @@ def _text_in_container(
     return " ".join(filter(None, parts))
 
 
+def _log_parse_warning(url: str, field: str, error: Exception) -> None:
+    error_type = type(error).__name__
+    logger.warning(
+        "Failed to parse %s for %s (%s)",
+        field,
+        url,
+        error_type,
+        extra={"event": "html_parse_failed", "url": url, "field": field, "error_type": error_type},
+    )
+
+
+def _extract_field[T](url: str, field: str, extract: Callable[[], T], default: T) -> T:
+    try:
+        return extract()
+    except Exception as error:
+        _log_parse_warning(url, field, error)
+        return default
+
+
 class HTMLParser:
     async def parse_html(self, html: str, url: str) -> ParsedPage:
-        soup = BeautifulSoup(html, "lxml")
-        metadata = self.extract_metadata(soup)
+        try:
+            soup = BeautifulSoup(html, "lxml")
+        except ParserRejectedMarkup as error:
+            _log_parse_warning(url, "html", error)
+            soup = BeautifulSoup("", "lxml")
+
+        metadata = _extract_field(
+            url,
+            "metadata",
+            lambda: self.extract_metadata(soup),
+            {"title": "", "description": "", "keywords": ""},
+        )
         return {
             "url": url,
             "title": metadata["title"],
-            "text": self.extract_text(soup),
-            "links": self.extract_links(soup, url),
-            "images": self.extract_images(soup, url),
-            "headings": self.extract_headings(soup),
-            "lists": self.extract_lists(soup),
-            "tables": self.extract_tables(soup),
+            "text": _extract_field(url, "text", lambda: self.extract_text(soup), ""),
+            "links": _extract_field(url, "links", lambda: self.extract_links(soup, url), []),
+            "images": _extract_field(url, "images", lambda: self.extract_images(soup, url), []),
+            "headings": _extract_field(url, "headings", lambda: self.extract_headings(soup), []),
+            "lists": _extract_field(url, "lists", lambda: self.extract_lists(soup), []),
+            "tables": _extract_field(url, "tables", lambda: self.extract_tables(soup), []),
             "metadata": metadata,
         }
 

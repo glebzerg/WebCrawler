@@ -1,7 +1,9 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from bs4 import BeautifulSoup
+from bs4.exceptions import ParserRejectedMarkup
 
 from crawler import HTMLParser
 
@@ -199,3 +201,55 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
             HTMLParser().extract_tables(soup),
             [[["До после", "Соседняя ячейка"]], [["Внутри"]]],
         )
+
+    async def test_parse_html_recovers_text_and_links_from_unclosed_tags(self) -> None:
+        html = '<title>Страница</title><body><p>Начало<p>Продолжение <a href="/next">Дальше'
+
+        page = await HTMLParser().parse_html(html, "https://example.com/start")
+
+        self.assertEqual(page["title"], "Страница")
+        self.assertEqual(page["text"], "Начало Продолжение Дальше")
+        self.assertEqual(page["links"], ["https://example.com/next"])
+
+    async def test_parse_html_keeps_other_fields_if_table_extraction_fails(self) -> None:
+        html = '<title>Страница</title><a href="/next">Дальше</a><table></table>'
+        url = "https://example.com/start"
+        parser = HTMLParser()
+
+        with patch.object(parser, "extract_tables", side_effect=ValueError("Broken table")):
+            with self.assertLogs("crawler.html_parser", level="WARNING") as captured:
+                page = await parser.parse_html(html, url)
+
+        self.assertEqual(page["title"], "Страница")
+        self.assertEqual(page["links"], ["https://example.com/next"])
+        self.assertEqual(page["tables"], [])
+        self.assertEqual(len(captured.records), 1)
+        warning = captured.records[0]
+        self.assertEqual(warning.url, url)
+        self.assertEqual(warning.field, "tables")
+        self.assertEqual(warning.error_type, "ValueError")
+
+    async def test_parse_html_returns_empty_fields_if_markup_is_rejected(self) -> None:
+        url = "https://example.com/rejected"
+        outcomes = [ParserRejectedMarkup("Rejected markup"), BeautifulSoup("", "lxml")]
+
+        with patch("crawler.html_parser.BeautifulSoup", side_effect=outcomes):
+            with self.assertLogs("crawler.html_parser", level="WARNING") as captured:
+                page = await HTMLParser().parse_html("<p>Example</p>", url)
+
+        self.assertEqual(
+            page,
+            {
+                "url": url,
+                "title": "",
+                "text": "",
+                "links": [],
+                "images": [],
+                "headings": [],
+                "lists": [],
+                "tables": [],
+                "metadata": {"title": "", "description": "", "keywords": ""},
+            },
+        )
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(captured.records[0].field, "html")
