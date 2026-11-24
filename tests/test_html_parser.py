@@ -23,6 +23,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "title": "Учебная страница",
                 "text": "Меню сайта Добро пожаловать Этот HTML используется в тестах парсера.",
                 "links": [],
+                "images": [],
                 "metadata": {
                     "title": "Учебная страница",
                     "description": "Пример для краулера",
@@ -44,6 +45,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "title": "",
                 "text": "",
                 "links": [],
+                "images": [],
                 "metadata": {"title": "", "description": "", "keywords": "python"},
             },
         )
@@ -92,3 +94,26 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                     parser.extract_links(soup, page_url),
                     ["https://example.com/blog/guide.html"],
                 )
+
+    async def test_parse_html_extracts_image_urls_and_alt_text(self) -> None:
+        html = """
+            <head><base href="../media/"></head>
+            <body>
+                <img src="cover.png" alt="Обложка">
+                <img src="//cdn.example.org/logo.svg">
+                <img alt="Изображение без адреса">
+                <img src="">
+                <img src="data:image/png;base64,AAAA">
+            </body>
+        """
+        url = "https://example.com/blog/posts/current.html"
+
+        page = await HTMLParser().parse_html(html, url)
+
+        self.assertEqual(
+            page["images"],
+            [
+                {"src": "https://example.com/blog/media/cover.png", "alt": "Обложка"},
+                {"src": "https://cdn.example.org/logo.svg", "alt": ""},
+            ],
+        )

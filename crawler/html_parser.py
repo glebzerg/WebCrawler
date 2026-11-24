@@ -29,10 +29,18 @@ def _resolve_http_url(base_url: str, reference: str) -> str | None:
     return url
 
 
+def _document_base_url(soup: BeautifulSoup, page_url: str) -> str:
+    base = soup.select_one("base[href]")
+    href = base.get("href") if base is not None else None
+    if isinstance(href, str):
+        return _resolve_http_url(page_url, href) or page_url
+    return page_url
+
+
 class HTMLParser:
     async def parse_html(
         self, html: str, url: str
-    ) -> dict[str, str | list[str] | dict[str, str]]:
+    ) -> dict[str, str | list[str] | list[dict[str, str]] | dict[str, str]]:
         soup = BeautifulSoup(html, "lxml")
         metadata = self.extract_metadata(soup)
         return {
@@ -40,16 +48,12 @@ class HTMLParser:
             "title": metadata["title"],
             "text": self.extract_text(soup),
             "links": self.extract_links(soup, url),
+            "images": self.extract_images(soup, url),
             "metadata": metadata,
         }
 
     def extract_links(self, soup: BeautifulSoup, base_url: str) -> list[str]:
-        base = soup.select_one("base[href]")
-        if base is not None:
-            href = base.get("href")
-            if isinstance(href, str):
-                base_url = _resolve_http_url(base_url, href) or base_url
-
+        base_url = _document_base_url(soup, base_url)
         links = []
         for anchor in soup.select("a[href]"):
             href = anchor.get("href")
@@ -58,6 +62,21 @@ class HTMLParser:
                 if url is not None:
                     links.append(url)
         return links
+
+    def extract_images(self, soup: BeautifulSoup, base_url: str) -> list[dict[str, str]]:
+        base_url = _document_base_url(soup, base_url)
+        images = []
+        for image in soup.select("img[src]"):
+            source = image.get("src")
+            if not isinstance(source, str):
+                continue
+            url = _resolve_http_url(base_url, source)
+            if url is None:
+                continue
+
+            alt = image.get("alt")
+            images.append({"src": url, "alt": alt if isinstance(alt, str) else ""})
+        return images
 
     def extract_text(self, soup: BeautifulSoup, selector: str | None = None) -> str:
         section = soup.body if selector is None else soup.select_one(selector)
