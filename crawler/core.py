@@ -16,7 +16,17 @@ class FetchConnectionError(ClientConnectionError):
 
 
 class AsyncCrawler:
-    def __init__(self, *, connect_timeout: float = 5.0, read_timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        max_concurrent: int = 10,
+        *,
+        connect_timeout: float = 5.0,
+        read_timeout: float = 10.0,
+    ) -> None:
+        if not isinstance(max_concurrent, int) or max_concurrent < 1:
+            raise ValueError("max_concurrent must be a positive integer")
+
+        self._request_slots = asyncio.Semaphore(max_concurrent)
         self._timeout = ClientTimeout(
             total=5 * 60,
             connect=connect_timeout,
@@ -35,13 +45,14 @@ class AsyncCrawler:
         return self._session
 
     async def fetch_url(self, url: str) -> str:
-        session = self._get_session()
-        try:
-            async with session.get(url) as response:
-                response.raise_for_status()
-                return await response.text()
-        except ClientConnectorError as error:
-            raise FetchConnectionError(url) from error
+        async with self._request_slots:
+            session = self._get_session()
+            try:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    return await response.text()
+            except ClientConnectorError as error:
+                raise FetchConnectionError(url) from error
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Fetch each unique URL and record failures for the completed batch."""

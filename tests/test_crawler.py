@@ -165,3 +165,59 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await crawler.fetch_urls([]), {})
         self.assertEqual(crawler.failed_urls, {})
+
+    def test_max_concurrent_must_be_positive(self) -> None:
+        for limit in (0, -1):
+            with self.subTest(limit=limit):
+                with self.assertRaisesRegex(ValueError, "max_concurrent"):
+                    AsyncCrawler(max_concurrent=limit)
+
+    async def test_fetch_urls_limits_active_requests_and_continues_after_500(self) -> None:
+        first_page_started = asyncio.Event()
+        later_page_started = asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def limited_page(request: web.Request) -> web.Response:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+
+            try:
+                name = request.match_info["name"]
+                if name == "error":
+                    await first_page_started.wait()
+                    return web.Response(status=500)
+
+                if name == "0":
+                    first_page_started.set()
+                    await later_page_started.wait()
+                else:
+                    later_page_started.set()
+
+                await asyncio.sleep(0.1)
+                return web.Response(text=name)
+            finally:
+                active -= 1
+
+        crawler = AsyncCrawler(max_concurrent=2)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/limited/{name}", limited_page)
+
+        async with server:
+            failed_url = str(server.make_url("/limited/error"))
+            expected = {str(server.make_url(f"/limited/{i}")): str(i) for i in range(5)}
+            try:
+                async with asyncio.timeout(5):
+                    pages = await crawler.fetch_urls([failed_url, *expected])
+            finally:
+                first_page_started.set()
+                later_page_started.set()
+
+        self.assertEqual(peak, 2)
+        self.assertEqual(pages, expected)
+        self.assertEqual(set(crawler.failed_urls), {failed_url})
+        error = crawler.failed_urls[failed_url]
+        self.assertIsInstance(error, ClientResponseError)
+        self.assertEqual(error.status, 500)
