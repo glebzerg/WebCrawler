@@ -1,8 +1,15 @@
 import asyncio
 import socket
 import unittest
+from unittest.mock import patch
 
-from aiohttp import ClientConnectorError, ClientResponseError, SocketTimeoutError, web
+from aiohttp import (
+    ClientConnectorError,
+    ClientResponse,
+    ClientResponseError,
+    SocketTimeoutError,
+    web,
+)
 
 from crawler import AsyncCrawler, FetchConnectionError
 from tests.http_server import make_test_server
@@ -221,3 +228,54 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         error = crawler.failed_urls[failed_url]
         self.assertIsInstance(error, ClientResponseError)
         self.assertEqual(error.status, 500)
+
+    async def test_cancelled_download_closes_connection_and_releases_slot(self) -> None:
+        reading_body = asyncio.Event()
+        client_disconnected = asyncio.Event()
+        release_body = asyncio.Event()
+
+        async def slow_page(request: web.Request) -> web.StreamResponse:
+            response = web.StreamResponse()
+            await response.prepare(request)
+            await response.write(b"First part of the body")
+            try:
+                await release_body.wait()
+            except asyncio.CancelledError:
+                client_disconnected.set()
+                raise
+            return response
+
+        original_text = ClientResponse.text
+
+        async def observe_body_read(response: ClientResponse) -> str:
+            reading_body.set()
+            return await original_text(response)
+
+        crawler = AsyncCrawler(max_concurrent=1)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/slow", slow_page)
+
+        async with server:
+            try:
+                with patch.object(ClientResponse, "text", observe_body_read):
+                    task = asyncio.create_task(
+                        crawler.fetch_url(str(server.make_url("/slow")))
+                    )
+                    try:
+                        await asyncio.wait_for(reading_body.wait(), timeout=5)
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(task, timeout=5)
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
+                await asyncio.wait_for(client_disconnected.wait(), timeout=5)
+                text = await asyncio.wait_for(
+                    crawler.fetch_url(str(server.make_url("/ok"))), timeout=5
+                )
+            finally:
+                release_body.set()
+
+        self.assertEqual(text, "Hello from the test server")
