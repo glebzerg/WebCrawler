@@ -26,6 +26,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "images": [],
                 "headings": [{"level": 1, "text": "Добро пожаловать"}],
                 "lists": [],
+                "tables": [],
                 "metadata": {
                     "title": "Учебная страница",
                     "description": "Пример для краулера",
@@ -50,6 +51,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 "images": [],
                 "headings": [],
                 "lists": [],
+                "tables": [],
                 "metadata": {"title": "", "description": "", "keywords": "python"},
             },
         )
@@ -158,4 +160,42 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
                 {"type": "ol", "items": ["aiohttp", "lxml"]},
                 {"type": "ol", "items": ["Запустить пример", "Прочитать результат"]},
             ],
+        )
+
+    async def test_parse_html_preserves_table_rows_and_empty_cells(self) -> None:
+        html = """
+            <table>
+                <thead><tr><th>Пакет</th><th>Версия</th><th>Назначение</th></tr></thead>
+                <tbody>
+                    <tr><th>aiohttp</th><td> </td><td>HTTP-клиент</td></tr>
+                    <tr><th>lxml</th><td>6</td><td>Разбор <strong>HTML</strong></td></tr>
+                </tbody>
+            </table>
+        """
+
+        page = await HTMLParser().parse_html(html, "https://example.com/packages")
+
+        self.assertEqual(
+            page["tables"],
+            [
+                [
+                    ["Пакет", "Версия", "Назначение"],
+                    ["aiohttp", "", "HTTP-клиент"],
+                    ["lxml", "6", "Разбор HTML"],
+                ],
+            ],
+        )
+
+    def test_extract_tables_keeps_nested_table_separate(self) -> None:
+        html = """
+            <table><tr>
+                <td>До <table><tr><td>Внутри</td></tr></table> после</td>
+                <td>Соседняя ячейка</td>
+            </tr></table>
+        """
+        soup = BeautifulSoup(html, "lxml")
+
+        self.assertEqual(
+            HTMLParser().extract_tables(soup),
+            [[["До после", "Соседняя ячейка"]], [["Внутри"]]],
         )

@@ -1,7 +1,7 @@
 from typing import TypedDict
 from urllib.parse import urljoin, urlsplit
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 
 class ParsedPage(TypedDict):
@@ -12,6 +12,7 @@ class ParsedPage(TypedDict):
     images: list[dict[str, str]]
     headings: list[dict[str, int | str]]
     lists: list[dict[str, str | list[str]]]
+    tables: list[list[list[str]]]
     metadata: dict[str, str]
 
 
@@ -49,6 +50,17 @@ def _document_base_url(soup: BeautifulSoup, page_url: str) -> str:
     return page_url
 
 
+def _text_in_container(
+    element: Tag, container: Tag, container_tags: tuple[str, ...]
+) -> str:
+    parts = (
+        text.strip()
+        for text in element.strings
+        if text.find_parent(container_tags) is container
+    )
+    return " ".join(filter(None, parts))
+
+
 class HTMLParser:
     async def parse_html(self, html: str, url: str) -> ParsedPage:
         soup = BeautifulSoup(html, "lxml")
@@ -61,6 +73,7 @@ class HTMLParser:
             "images": self.extract_images(soup, url),
             "headings": self.extract_headings(soup),
             "lists": self.extract_lists(soup),
+            "tables": self.extract_tables(soup),
             "metadata": metadata,
         }
 
@@ -99,16 +112,27 @@ class HTMLParser:
     def extract_lists(self, soup: BeautifulSoup) -> list[dict[str, str | list[str]]]:
         lists = []
         for list_tag in soup.select("ul, ol"):
-            items = []
-            for item in list_tag.find_all("li", recursive=False):
-                parts = (
-                    text.strip()
-                    for text in item.strings
-                    if text.find_parent(("ul", "ol")) is list_tag
-                )
-                items.append(" ".join(filter(None, parts)))
+            items = [
+                _text_in_container(item, list_tag, ("ul", "ol"))
+                for item in list_tag.find_all("li", recursive=False)
+            ]
             lists.append({"type": list_tag.name, "items": items})
         return lists
+
+    def extract_tables(self, soup: BeautifulSoup) -> list[list[list[str]]]:
+        tables = []
+        for table in soup.find_all("table"):
+            rows = []
+            for row in table.find_all("tr"):
+                if row.find_parent("table") is not table:
+                    continue
+                cells = [
+                    _text_in_container(cell, table, ("table",))
+                    for cell in row.find_all(("th", "td"), recursive=False)
+                ]
+                rows.append(cells)
+            tables.append(rows)
+        return tables
 
     def extract_text(self, soup: BeautifulSoup, selector: str | None = None) -> str:
         section = soup.body if selector is None else soup.select_one(selector)
