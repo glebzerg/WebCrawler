@@ -1,4 +1,12 @@
-from aiohttp import ClientConnectionError, ClientConnectorError, ClientSession, ClientTimeout
+import asyncio
+
+from aiohttp import (
+    ClientConnectionError,
+    ClientConnectorError,
+    ClientError,
+    ClientSession,
+    ClientTimeout,
+)
 
 
 class FetchConnectionError(ClientConnectionError):
@@ -16,6 +24,7 @@ class AsyncCrawler:
         )
         self._session: ClientSession | None = None
         self._closed = False
+        self.failed_urls: dict[str, Exception] = {}
 
     def _get_session(self) -> ClientSession:
         if self._closed:
@@ -33,6 +42,27 @@ class AsyncCrawler:
                 return await response.text()
         except ClientConnectorError as error:
             raise FetchConnectionError(url) from error
+
+    async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
+        """Fetch each unique URL and record failures for the completed batch."""
+        batch_urls = list(dict.fromkeys(urls))
+        outcomes = await asyncio.gather(
+            *(self.fetch_url(url) for url in batch_urls),
+            return_exceptions=True,
+        )
+
+        pages: dict[str, str] = {}
+        failures: dict[str, Exception] = {}
+        for url, outcome in zip(batch_urls, outcomes, strict=True):
+            if isinstance(outcome, (ClientError, TimeoutError, UnicodeDecodeError)):
+                failures[url] = outcome
+            elif isinstance(outcome, BaseException):
+                raise outcome
+            else:
+                pages[url] = outcome
+
+        self.failed_urls = failures
+        return pages
 
     async def close(self) -> None:
         self._closed = True

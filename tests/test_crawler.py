@@ -119,3 +119,49 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             text = await crawler.fetch_url(str(server.make_url("/ok")))
 
         self.assertEqual(text, "Hello from the test server")
+
+    async def test_fetch_urls_overlaps_requests_and_keeps_successes(self) -> None:
+        both_started = asyncio.Event()
+        started: list[str] = []
+
+        async def overlapping_page(request: web.Request) -> web.Response:
+            name = request.match_info["name"]
+            started.append(name)
+            if len(started) == 2:
+                both_started.set()
+            await both_started.wait()
+            return web.Response(text=name)
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/overlap/{name}", overlapping_page)
+
+        async with server:
+            first = str(server.make_url("/overlap/first"))
+            second = str(server.make_url("/overlap/second"))
+            missing = str(server.make_url("/missing"))
+            try:
+                async with asyncio.timeout(5):
+                    pages = await crawler.fetch_urls([first, missing, second, first])
+            finally:
+                both_started.set()
+
+        self.assertEqual(pages, {first: "first", second: "second"})
+        self.assertCountEqual(started, ["first", "second"])
+        self.assertEqual(set(crawler.failed_urls), {missing})
+        error = crawler.failed_urls[missing]
+        self.assertIsInstance(error, ClientResponseError)
+        self.assertEqual(error.status, 404)
+
+    async def test_empty_fetch_batch_resets_previous_failures(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            missing = str(server.make_url("/missing"))
+            self.assertEqual(await crawler.fetch_urls([missing]), {})
+            self.assertIn(missing, crawler.failed_urls)
+
+        self.assertEqual(await crawler.fetch_urls([]), {})
+        self.assertEqual(crawler.failed_urls, {})
