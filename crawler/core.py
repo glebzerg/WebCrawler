@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -27,7 +27,7 @@ from .robots_cache import RobotsCache
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
 from .stats import CrawlerStats, CrawlStats
-from .storage import DataStorage
+from .storage import DataStorage, StorageRecoveryError
 from .urls import resolve_http_url, url_key
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,14 @@ class AsyncCrawler:
         retry_strategy: RetryStrategy | None = None,
         storage: DataStorage | None = None,
         storage_queue_size: int = 10,
+        storage_max_retries: int = 2,
     ) -> None:
         if not isinstance(max_redirects, int) or max_redirects < 0:
             raise ValueError("max_redirects must be a non-negative integer")
         if not isinstance(storage_queue_size, int) or storage_queue_size < 1:
             raise ValueError("storage_queue_size must be a positive integer")
+        if not isinstance(storage_max_retries, int) or storage_max_retries < 0:
+            raise ValueError("storage_max_retries must be a non-negative integer")
 
         self._max_concurrent = max_concurrent
         self._max_redirects = max_redirects
@@ -118,6 +121,7 @@ class AsyncCrawler:
         self._stats = CrawlerStats()
         self._storage = storage
         self._storage_queue_size = storage_queue_size
+        self._storage_max_retries = storage_max_retries
         self._storage_lock = asyncio.Lock()
         self.failed_urls: dict[str, Exception] = {}
 
@@ -478,12 +482,61 @@ class AsyncCrawler:
 
             async def write_pages() -> None:
                 while (page := await queue.get()) is not None:
-                    await storage.save(page)
+                    try:
+                        await self._retry_storage(lambda: storage.save(page))
+                    except Exception as error:
+                        await self._report_storage_failure(storage, error, url=page["url"])
+                    else:
+                        self._stats.saved_pages += 1
 
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(write_pages())
                 yield queue
                 await queue.put(None)
+
+    async def _retry_storage(self, operation: Callable[[], Awaitable[None]]) -> None:
+        for retries in range(self._storage_max_retries + 1):
+            try:
+                await operation()
+                return
+            except StorageRecoveryError:
+                raise
+            except Exception:
+                if retries == self._storage_max_retries:
+                    raise
+
+    async def _report_storage_failure(
+        self, storage: DataStorage, error: Exception, *, url: str | None = None
+    ) -> tuple[str, ...]:
+        discarded = await storage.discard_failed_batch(error)
+        urls = discarded if url is None else (*discarded, url)
+        self._stats.record_storage_failure(error, urls, discarded=len(discarded), closing=url is None)
+        logger.error(
+            "Storage %s failed for %s: %s",
+            "close" if url is None else "write",
+            ", ".join(urls) or type(storage).__name__,
+            error,
+            extra={
+                "event": "storage_close_failed" if url is None else "storage_write_failed",
+                "url": url,
+                "affected_urls": urls,
+                "error_type": type(error).__name__,
+            },
+        )
+        return discarded
+
+    async def _close_storage(self, storage: DataStorage) -> None:
+        try:
+            await self._retry_storage(storage.close)
+        except Exception as error:
+            if not await self._report_storage_failure(storage, error):
+                return
+            try:
+                await storage.close()
+            except Exception as cleanup_error:
+                await self._report_storage_failure(storage, cleanup_error)
+                return
+        self._storage = None
 
     async def close(self) -> None:
         async with self._storage_lock:
@@ -496,5 +549,4 @@ class AsyncCrawler:
                         await self._session.close()
                 finally:
                     if self._storage is not None:
-                        await self._storage.close()
-                        self._storage = None
+                        await self._close_storage(self._storage)

@@ -908,6 +908,33 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         await crawler.close()
         self.assertEqual(storage.saved_counts_at_close, [4])
 
+    async def test_permanent_storage_failure_is_reported_and_later_pages_are_saved(self) -> None:
+        attempts: list[str] = []
+
+        class FailingStorage(MemoryStorage):
+            async def save(self, data: PageRecord) -> None:
+                attempts.append(data["url"])
+                if data["url"].endswith("/empty"):
+                    raise OSError("test storage failure")
+                await super().save(data)
+
+        storage = FailingStorage()
+        crawler = AsyncCrawler(max_concurrent=1, storage=storage, storage_max_retries=1)
+        self.addAsyncCleanup(crawler.close)
+        async with make_test_server() as server:
+            failed = str(server.make_url("/empty"))
+            later = str(server.make_url("/ok"))
+            with self.assertLogs("crawler.core", level="ERROR") as captured:
+                pages = await crawler.crawl([failed, later])
+
+        self.assertEqual(attempts, [failed, failed, later])
+        self.assertEqual(set(pages), {failed, later})
+        self.assertEqual(crawler.failed_urls, {})
+        self.assertEqual(storage.records, [pages[later]])
+        self.assertEqual(crawler.get_stats()["saved_pages"], 1)
+        self.assertEqual(crawler.get_stats()["storage_errors"], {failed: "test storage failure"})
+        self.assertEqual(captured.records[0].event, "storage_write_failed")
+
     async def test_fetch_url_raises_http_error_with_status_and_url(self) -> None:
         crawler = AsyncCrawler()
         self.addAsyncCleanup(crawler.close)
@@ -1116,6 +1143,9 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
                 "successful_retries": 1,
                 "average_retry_duration": 2.5,
                 "permanent_errors": {missing: str(crawler.failed_urls[missing])},
+                "saved_pages": 0,
+                "storage_errors": {},
+                "storage_close_error": None,
             },
         )
 

@@ -1,11 +1,12 @@
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import aiofiles.os
 import aiosqlite
 
 from .page_record import PageRecord, serialize_table_row
-from .storage import DataStorage
+from .storage import DataStorage, StorageRecoveryError
 
 
 _CREATE_PAGES = """
@@ -58,6 +59,8 @@ class SQLiteStorage(DataStorage):
         self._path = Path(path)
         self._batch_size = batch_size
         self._pending_rows: list[dict[str, object]] = []
+        self._failed_batch: BaseException | None = None
+        self._connection_error: StorageRecoveryError | None = None
         self._connection: aiosqlite.Connection | None = None
         self._closed = False
         self._lock = asyncio.Lock()
@@ -82,11 +85,23 @@ class SQLiteStorage(DataStorage):
         async with self._lock:
             if self._connection is not None:
                 if self._pending_rows:
+                    if self._connection_error is not None:
+                        self._failed_batch = self._connection_error
+                        raise self._connection_error
                     await self._write_batch(self._connection, self._pending_rows)
                     self._pending_rows.clear()
                 await self._connection.close()
                 self._connection = None
             self._closed = True
+
+    async def discard_failed_batch(self, error: Exception) -> tuple[str, ...]:
+        async with self._lock:
+            if self._failed_batch is not error:
+                return ()
+            urls = tuple(cast(str, row["url"]) for row in self._pending_rows)
+            self._pending_rows.clear()
+            self._failed_batch = None
+            return urls
 
     async def _write_batch(
         self, connection: aiosqlite.Connection, rows: list[dict[str, object]]
@@ -95,13 +110,23 @@ class SQLiteStorage(DataStorage):
             async with connection.executemany(_UPSERT_PAGE, rows):
                 pass
             await connection.commit()
-        except BaseException:
-            await connection.rollback()
+        except BaseException as error:
+            try:
+                await connection.rollback()
+            except Exception as rollback_error:
+                failure = StorageRecoveryError(f"Cannot roll back SQLite write: {rollback_error}")
+                self._connection_error = failure
+                self._failed_batch = failure
+                raise failure from error
+            self._failed_batch = error
             raise
+        self._failed_batch = None
 
     async def _get_connection(self) -> aiosqlite.Connection:
         if self._closed:
             raise RuntimeError("SQLiteStorage is closed")
+        if self._connection_error is not None:
+            raise self._connection_error
         if self._connection is None:
             await aiofiles.os.makedirs(self._path.parent, exist_ok=True)
             connection = await aiosqlite.connect(self._path)

@@ -24,6 +24,14 @@ class DataStorage(ABC):
     async def close(self) -> None:
         """Finish writing and release any resources held by the storage."""
 
+    async def discard_failed_batch(self, error: Exception) -> tuple[str, ...]:
+        """Discard previously accepted records in a batch that cannot be saved."""
+        return ()
+
+
+class StorageRecoveryError(RuntimeError):
+    """The failed storage operation cannot safely be repeated."""
+
 
 class _TextFileStorage(DataStorage):
     def __init__(self, path: str | Path) -> None:
@@ -31,6 +39,7 @@ class _TextFileStorage(DataStorage):
         self._encoding = "utf-8"
         self._file: AsyncTextIOWrapper | None = None
         self._closed = False
+        self._write_failed = False
         self._lock = asyncio.Lock()
 
     async def _get_file(self) -> AsyncTextIOWrapper:
@@ -38,6 +47,41 @@ class _TextFileStorage(DataStorage):
             await aiofiles.os.makedirs(self._path.parent, exist_ok=True)
             self._file = await aiofiles.open(self._path, "w", encoding=self._encoding, newline="")
         return self._file
+
+    async def _write_chunk(self, chunk: str) -> None:
+        if self._write_failed:
+            raise StorageRecoveryError(f"Cannot write {self._path} after a failed rollback")
+
+        file = await self._get_file()
+        position = await file.tell()
+        try:
+            if await file.write(chunk) != len(chunk):
+                raise OSError("Incomplete file write")
+            await file.flush()
+        except Exception as error:
+            try:
+                await file.seek(position)
+                await file.truncate()
+            except Exception as rollback_error:
+                self._write_failed = True
+                raise StorageRecoveryError(
+                    f"Cannot restore {self._path} after {error}: {rollback_error}"
+                ) from rollback_error
+            raise
+
+    async def _close_file(self, footer: str = "") -> None:
+        file = await self._get_file()
+        self._closed = True
+        try:
+            try:
+                if self._write_failed:
+                    raise OSError("File position could not be restored")
+                if footer:
+                    await self._write_chunk(footer)
+            finally:
+                await file.close()
+        except Exception as error:
+            raise StorageRecoveryError(f"Cannot finalize {self._path}: {error}") from error
 
 
 class JSONStorage(_TextFileStorage):
@@ -53,9 +97,8 @@ class JSONStorage(_TextFileStorage):
                 raise RuntimeError("JSONStorage is closed")
 
             record = json.dumps(serialize_page(data), ensure_ascii=False, indent=2)
-            file = await self._get_file()
             prefix = ",\n" if self._has_records else "[\n"
-            await file.write(prefix + indent(record, "  "))
+            await self._write_chunk(prefix + indent(record, "  "))
             self._has_records = True
 
     async def close(self) -> None:
@@ -63,12 +106,7 @@ class JSONStorage(_TextFileStorage):
             if self._closed:
                 return
 
-            file = await self._get_file()
-            self._closed = True
-            try:
-                await file.write("\n]\n" if self._has_records else "[]\n")
-            finally:
-                await file.close()
+            await self._close_file("\n]\n" if self._has_records else "[]\n")
 
 
 class JSONLStorage(_TextFileStorage):
@@ -80,17 +118,14 @@ class JSONLStorage(_TextFileStorage):
                 raise RuntimeError("JSONLStorage is closed")
 
             record = json.dumps(serialize_page(data), ensure_ascii=False, separators=(",", ":"))
-            file = await self._get_file()
-            await file.write(record + "\n")
+            await self._write_chunk(record + "\n")
 
     async def close(self) -> None:
         async with self._lock:
             if self._closed:
                 return
 
-            file = await self._get_file()
-            self._closed = True
-            await file.close()
+            await self._close_file()
 
 
 class CSVStorage(_TextFileStorage):
@@ -109,8 +144,7 @@ class CSVStorage(_TextFileStorage):
                 raise RuntimeError("CSVStorage is closed")
 
             chunk = self._format_csv(serialize_table_row(data))
-            file = await self._get_file()
-            await file.write(chunk)
+            await self._write_chunk(chunk)
             self._has_records = True
 
     async def close(self) -> None:
@@ -118,13 +152,7 @@ class CSVStorage(_TextFileStorage):
             if self._closed:
                 return
 
-            file = await self._get_file()
-            self._closed = True
-            try:
-                if not self._has_records:
-                    await file.write(self._format_csv())
-            finally:
-                await file.close()
+            await self._close_file("" if self._has_records else self._format_csv())
 
     def _format_csv(self, row: dict[str, object] | None = None) -> str:
         with StringIO(newline="") as buffer:

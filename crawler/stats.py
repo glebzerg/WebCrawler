@@ -13,12 +13,16 @@ class CrawlStats(TypedDict):
     successful_retries: int
     average_retry_duration: float
     permanent_errors: dict[str, str]
+    saved_pages: int
+    storage_errors: dict[str, str]
+    storage_close_error: str | None
 
 
 class CrawlerStats:
     def __init__(self) -> None:
         self.http_attempts = 0
         self.processed_pages = 0
+        self.saved_pages = 0
         self._failed_pages = 0
         self._blocked_pages = 0
         self._errors_by_type: Counter[str] = Counter()
@@ -26,6 +30,8 @@ class CrawlerStats:
         self._completed_retries = 0
         self._retry_duration = 0.0
         self._permanent_errors: dict[str, str] = {}
+        self._storage_errors: dict[str, str] = {}
+        self._storage_close_error: str | None = None
 
     def record_http_result(
         self, attempt_number: int, duration: float, *, error_type: str | None = None
@@ -60,4 +66,16 @@ class CrawlerStats:
             "successful_retries": self._successful_retries,
             "average_retry_duration": average_duration,
             "permanent_errors": self._permanent_errors.copy(),
+            "saved_pages": self.saved_pages,
+            "storage_errors": self._storage_errors.copy(),
+            "storage_close_error": self._storage_close_error,
         }
+
+    def record_storage_failure(
+        self, error: Exception, urls: tuple[str, ...], *, discarded: int, closing: bool
+    ) -> None:
+        self.saved_pages -= discarded
+        message = str(error)
+        self._storage_errors.update(dict.fromkeys(urls, message))
+        if closing:
+            self._storage_close_error = message

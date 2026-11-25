@@ -3,6 +3,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import aiofiles
 from aiohttp import web
@@ -52,6 +53,38 @@ class JSONStorageTest(unittest.IsolatedAsyncioTestCase):
                         else:
                             self.assertEqual(content, "[]\n")
 
+    async def test_partial_write_is_removed_before_the_crawler_retries_it(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "pages.json"
+            storage = JSONStorage(path)
+            file = await storage._get_file()
+            write = file.write
+            second_record_attempts = 0
+
+            async def interrupt_second_record(chunk: str) -> int:
+                nonlocal second_record_attempts
+                if chunk.startswith(",\n"):
+                    second_record_attempts += 1
+                    if second_record_attempts == 1:
+                        await write(chunk[:20])
+                        await file.flush()
+                        raise OSError("test partial write")
+                return await write(chunk)
+
+            crawler = AsyncCrawler(max_concurrent=1, storage=storage, storage_max_retries=1)
+            with patch.object(file, "write", side_effect=interrupt_second_record):
+                try:
+                    async with make_test_server() as server:
+                        urls = [str(server.make_url(path)) for path in ("/ok", "/empty")]
+                        pages = await crawler.crawl(urls)
+                finally:
+                    await crawler.close()
+
+            self.assertEqual(second_record_attempts, 2)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved, [serialize_page(pages[url]) for url in urls])
+            self.assertEqual(crawler.get_stats()["saved_pages"], 2)
+            self.assertEqual(crawler.get_stats()["storage_errors"], {})
 
 class JSONLStorageTest(unittest.IsolatedAsyncioTestCase):
     async def test_crawl_writes_three_independent_lines_and_preserves_newlines(self) -> None:

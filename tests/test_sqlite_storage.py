@@ -5,8 +5,9 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from crawler import PageRecord, SQLiteStorage, serialize_page
+from crawler import AsyncCrawler, PageRecord, SQLiteStorage, serialize_page
 
 
 def make_page(url: str) -> PageRecord:
@@ -66,6 +67,37 @@ class SQLiteStorageTest(unittest.IsolatedAsyncioTestCase):
             for field in ("links", "images", "headings", "lists", "tables", "metadata"):
                 saved[field] = json.loads(saved[field])
             self.assertEqual(saved, serialize_page(updated))
+
+    async def test_crawl_reports_every_discarded_sqlite_record_and_saves_the_next_page(self) -> None:
+        urls = [f"https://example.test/{name}" for name in ("bad", "discarded", "good")]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "pages.db"
+            storage = SQLiteStorage(path, batch_size=2)
+            crawler = AsyncCrawler(storage=storage, max_concurrent=1, storage_max_retries=1)
+            try:
+                await storage.init_db()
+                with closing(sqlite3.connect(path)) as connection:
+                    connection.execute("""
+                        CREATE TRIGGER reject_bad BEFORE INSERT ON pages
+                        WHEN NEW.url = 'https://example.test/bad'
+                        BEGIN SELECT RAISE(ABORT, 'test bad record'); END;
+                    """)
+                records = [make_page(url) for url in urls]
+                with (
+                    patch.object(crawler, "fetch_and_parse", side_effect=records),
+                    self.assertLogs("crawler.core", level="ERROR"),
+                ):
+                    pages = await crawler.crawl(urls, max_depth=0)
+            finally:
+                await crawler.close()
+
+            self.assertEqual(set(pages), set(urls))
+            stats = crawler.get_stats()
+            self.assertEqual(stats["saved_pages"], 1)
+            self.assertEqual(stats["storage_errors"], dict.fromkeys(urls[:2], "test bad record"))
+            with closing(sqlite3.connect(path)) as connection:
+                rows = connection.execute("SELECT url FROM pages").fetchall()
+            self.assertEqual(rows, [(urls[2],)])
 
     async def test_full_batches_commit_during_save_and_close_flushes_the_remainder(self) -> None:
         urls = [f"https://example.test/page/{number}" for number in range(1, 6)]
