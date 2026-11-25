@@ -526,6 +526,66 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, "max_concurrent"):
                     AsyncCrawler(max_concurrent=limit)
 
+    def test_max_per_host_must_be_positive_when_set(self) -> None:
+        with self.assertRaisesRegex(ValueError, "max_per_host"):
+            AsyncCrawler(max_per_host=0)
+
+    async def test_fetch_urls_applies_global_and_per_host_limits(self) -> None:
+        active_by_host = {"127.0.0.1": 0, "localhost": 0}
+        peak_by_host = dict(active_by_host)
+        peak_total = 0
+        three_started = asyncio.Event()
+        allow_responses = asyncio.Event()
+        two_localhost_requests_started = asyncio.Event()
+
+        async def measured_page(request: web.Request) -> web.Response:
+            nonlocal peak_total
+            host = request.url.host
+            active_by_host[host] += 1
+            peak_by_host[host] = max(peak_by_host[host], active_by_host[host])
+            peak_total = max(peak_total, sum(active_by_host.values()))
+            if peak_total >= 3:
+                three_started.set()
+            if active_by_host["localhost"] >= 2:
+                two_localhost_requests_started.set()
+
+            try:
+                await allow_responses.wait()
+                if host == "localhost":
+                    await two_localhost_requests_started.wait()
+                await asyncio.sleep(0.05)
+                return web.Response(text="Page")
+            finally:
+                active_by_host[host] -= 1
+
+        crawler = AsyncCrawler(max_concurrent=3, max_per_host=2)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/measured/{number}", measured_page)
+
+        async with server:
+            urls = [
+                str(server.make_url(f"/measured/{number}").with_host(host))
+                for host in ("127.0.0.1", "localhost")
+                for number in range(3)
+            ]
+            task = asyncio.create_task(crawler.fetch_urls(urls))
+            try:
+                await asyncio.wait_for(three_started.wait(), timeout=5)
+                self.assertEqual(crawler.active_requests, 3)
+                allow_responses.set()
+                pages = await asyncio.wait_for(task, timeout=5)
+            finally:
+                allow_responses.set()
+                two_localhost_requests_started.set()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.assertEqual(set(pages), set(urls))
+        self.assertEqual(peak_total, 3)
+        self.assertEqual(peak_by_host, {"127.0.0.1": 2, "localhost": 2})
+        self.assertEqual(crawler.active_requests, 0)
+
     async def test_fetch_urls_limits_active_requests_and_continues_after_500(self) -> None:
         first_page_started = asyncio.Event()
         later_page_started = asyncio.Event()
@@ -575,6 +635,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         error = crawler.failed_urls[failed_url]
         self.assertIsInstance(error, ClientResponseError)
         self.assertEqual(error.status, 500)
+        self.assertEqual(crawler.active_requests, 0)
 
     async def test_cancelled_download_closes_connection_and_releases_slot(self) -> None:
         reading_body = asyncio.Event()

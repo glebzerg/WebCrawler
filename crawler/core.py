@@ -14,6 +14,7 @@ from aiohttp import (
 
 from .html_parser import HTMLParser, ParsedPage
 from .queue import CrawlerQueue
+from .semaphore_manager import SemaphoreManager
 from .urls import url_key
 
 logger = logging.getLogger(__name__)
@@ -31,14 +32,12 @@ class AsyncCrawler:
         self,
         max_concurrent: int = 10,
         *,
+        max_per_host: int | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
     ) -> None:
-        if not isinstance(max_concurrent, int) or max_concurrent < 1:
-            raise ValueError("max_concurrent must be a positive integer")
-
         self._max_concurrent = max_concurrent
-        self._request_slots = asyncio.Semaphore(max_concurrent)
+        self._semaphores = SemaphoreManager(max_concurrent, max_per_host)
         self._timeout = ClientTimeout(
             total=5 * 60,
             connect=connect_timeout,
@@ -47,6 +46,10 @@ class AsyncCrawler:
         self._session: ClientSession | None = None
         self._closed = False
         self.failed_urls: dict[str, Exception] = {}
+
+    @property
+    def active_requests(self) -> int:
+        return self._semaphores.active_requests
 
     def _get_session(self) -> ClientSession:
         if self._closed:
@@ -67,7 +70,12 @@ class AsyncCrawler:
         return page
 
     async def _fetch_page(self, url: str) -> tuple[str, str]:
-        async with self._request_slots:
+        try:
+            host = urlsplit(url).hostname
+        except ValueError:
+            host = None
+
+        async with self._semaphores.acquire(host):
             session = self._get_session()
             logger.info(
                 "Started fetching %s",
