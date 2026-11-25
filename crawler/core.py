@@ -20,10 +20,11 @@ from .rate_limiter import RateLimiter
 from .robots_cache import RobotsCache
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
-from .urls import url_key
+from .urls import resolve_http_url, url_key
 
 logger = logging.getLogger(__name__)
 _FETCH_ERRORS = (ClientError, TimeoutError, UnicodeDecodeError)
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 class CrawlProgress(QueueStats):
@@ -42,6 +43,12 @@ class RobotsDisallowedError(ClientError):
         super().__init__(f"Blocked by robots.txt: {url}")
 
 
+class RedirectError(ClientError):
+    def __init__(self, url: str, reason: str) -> None:
+        self.url = url
+        super().__init__(f"Cannot follow redirect from {url}: {reason}")
+
+
 class AsyncCrawler:
     def __init__(
         self,
@@ -54,10 +61,15 @@ class AsyncCrawler:
         jitter: float = 0.0,
         user_agent: str = "WebCrawler/0.1",
         respect_robots: bool = False,
+        max_redirects: int = 10,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
     ) -> None:
+        if not isinstance(max_redirects, int) or max_redirects < 0:
+            raise ValueError("max_redirects must be a non-negative integer")
+
         self._max_concurrent = max_concurrent
+        self._max_redirects = max_redirects
         self._semaphores = SemaphoreManager(max_concurrent, max_per_host)
         self._rate_limiter = (
             RateLimiter(
@@ -109,13 +121,49 @@ class AsyncCrawler:
         text, _ = await self._fetch_page(url, check_robots=False)
         return text
 
-    async def fetch_and_parse(self, url: str) -> ParsedPage:
-        html, final_url = await self._fetch_page(url)
+    async def fetch_and_parse(
+        self, url: str, *, redirect_filter: Callable[[str], bool] | None = None
+    ) -> ParsedPage:
+        html, final_url = await self._fetch_page(url, redirect_filter=redirect_filter)
         page = await HTMLParser().parse_html(html, final_url)
         page["url"] = url
         return page
 
-    async def _fetch_page(self, url: str, *, check_robots: bool = True) -> tuple[str, str]:
+    async def _fetch_page(
+        self,
+        url: str,
+        *,
+        check_robots: bool = True,
+        redirect_filter: Callable[[str], bool] | None = None,
+    ) -> tuple[str, str]:
+        current_url = url
+        seen: set[str] = set()
+        redirects = 0
+
+        while True:
+            body, response_url, location = await self._fetch_once(
+                current_url, check_robots=check_robots
+            )
+            if location is None:
+                return body, response_url
+
+            if redirects >= self._max_redirects:
+                raise RedirectError(url, f"redirect limit of {self._max_redirects} reached")
+            target = resolve_http_url(response_url, location)
+            if target is None:
+                raise RedirectError(url, f"invalid redirect target: {location}")
+            if redirect_filter is not None and not redirect_filter(target):
+                raise RedirectError(url, f"target outside the crawl scope: {target}")
+
+            seen.add(url_key(response_url))
+            if url_key(target) in seen:
+                raise RedirectError(url, f"redirect loop at {target}")
+            current_url = target
+            redirects += 1
+
+    async def _fetch_once(
+        self, url: str, *, check_robots: bool
+    ) -> tuple[str, str, str | None]:
         crawl_delay = 0.0
         if self._respect_robots and check_robots:
             try:
@@ -147,10 +195,13 @@ class AsyncCrawler:
                 extra={"event": "fetch_started", "url": url},
             )
             try:
-                async with session.get(url) as response:
+                async with session.get(url, allow_redirects=False) as response:
                     response.raise_for_status()
-                    text = await response.text()
-                    final_url = str(response.url)
+                    location = None
+                    if response.status in _REDIRECT_STATUSES:
+                        location = response.headers.get("Location") or response.headers.get("URI")
+                    text = await response.text() if location is None else ""
+                    response_url = str(response.url)
             except Exception as error:
                 error_type = type(error).__name__
                 logger.warning(
@@ -168,7 +219,7 @@ class AsyncCrawler:
                 url,
                 extra={"event": "fetch_succeeded", "url": url},
             )
-            return text, final_url
+            return text, response_url, location
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Fetch each unique URL and record failures for the completed batch."""
@@ -263,7 +314,7 @@ class AsyncCrawler:
                 url, _ = job
 
                 try:
-                    page = await self.fetch_and_parse(url)
+                    page = await self.fetch_and_parse(url, redirect_filter=should_enqueue)
                 except _FETCH_ERRORS as error:
                     queue.mark_failed(url, str(error))
                     failures[url] = error

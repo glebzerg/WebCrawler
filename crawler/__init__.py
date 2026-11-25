@@ -1,4 +1,10 @@
-from .core import AsyncCrawler, CrawlProgress, FetchConnectionError, RobotsDisallowedError
+from .core import (
+    AsyncCrawler,
+    CrawlProgress,
+    FetchConnectionError,
+    RedirectError,
+    RobotsDisallowedError,
+)
 from .html_parser import HTMLParser
 from .queue import CrawlerQueue
 from .rate_limiter import RateLimiter
@@ -13,6 +19,7 @@ __all__ = [
     "FetchConnectionError",
     "HTMLParser",
     "RateLimiter",
+    "RedirectError",
     "RobotsDisallowedError",
     "RobotsParser",
     "RobotsUnavailableError",

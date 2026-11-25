@@ -1,4 +1,30 @@
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+
+def resolve_http_url(base_url: str, reference: str) -> str | None:
+    reference = reference.strip()
+    if not reference:
+        return None
+
+    try:
+        source = urlsplit(reference)
+        if (source.scheme or reference.startswith("//")) and not source.hostname:
+            return None
+
+        url = urljoin(base_url, reference)
+        address = urlsplit(url)
+        host = address.hostname
+        if address.scheme not in {"http", "https"} or not host:
+            return None
+        if any(character.isspace() for character in host):
+            return None
+
+        # Accessing port validates its format and range.
+        _ = address.port
+    except ValueError:
+        return None
+
+    return url
 
 
 def url_key(url: str) -> str:

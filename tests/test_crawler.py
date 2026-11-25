@@ -18,6 +18,7 @@ from crawler import (
     FetchConnectionError,
     HTMLParser,
     RateLimiter,
+    RedirectError,
     RobotsDisallowedError,
     RobotsUnavailableError,
 )
@@ -281,6 +282,148 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["title"], "Docs")
         self.assertEqual(page["links"], [expected_link])
 
+    async def test_redirect_checks_robots_rules_at_the_destination_site(self) -> None:
+        requests: list[tuple[str, str]] = []
+        destination = make_test_server()
+        source = make_test_server()
+
+        async def source_robots(request: web.Request) -> web.Response:
+            requests.append(("source", request.path))
+            return web.Response(text="User-agent: *\nAllow: /")
+
+        async def start(request: web.Request) -> web.Response:
+            requests.append(("source", request.path))
+            raise web.HTTPFound(destination.make_url("/private"))
+
+        async def destination_page(request: web.Request) -> web.Response:
+            requests.append(("destination", request.path))
+            if request.path == "/robots.txt":
+                return web.Response(text="User-agent: *\nDisallow: /private")
+            return web.Response(text="Private page")
+
+        source.app.router.add_get("/robots.txt", source_robots)
+        source.app.router.add_get("/start", start)
+        destination.app.router.add_get("/{path:.*}", destination_page)
+        crawler = AsyncCrawler(max_concurrent=1, respect_robots=True)
+        self.addAsyncCleanup(crawler.close)
+
+        async with source, destination:
+            start_url = str(source.make_url("/start"))
+            private_url = str(destination.make_url("/private"))
+            with self.assertRaises(RobotsDisallowedError) as raised:
+                await asyncio.wait_for(crawler.fetch_url(start_url), timeout=15)
+
+        self.assertEqual(raised.exception.url, private_url)
+        self.assertEqual(
+            requests,
+            [
+                ("source", "/robots.txt"),
+                ("source", "/start"),
+                ("destination", "/robots.txt"),
+            ],
+        )
+
+    async def test_redirect_honors_crawl_host_and_pattern_filters(self) -> None:
+        requests = []
+
+        async def scoped_page(request: web.Request) -> web.Response:
+            requests.append(request.path)
+            if request.path == "/docs/redirect-host":
+                raise web.HTTPFound(
+                    request.url.with_host("localhost").with_path("/docs/allowed-target")
+                )
+            if request.path == "/docs/redirect-pattern":
+                raise web.HTTPFound("/docs/private/target")
+            return web.Response(text="Page")
+
+        server = make_test_server()
+        server.app.router.add_get("/{path:.*}", scoped_page)
+        crawler = AsyncCrawler(max_concurrent=1)
+        self.addAsyncCleanup(crawler.close)
+
+        async with server:
+            host_redirect = str(server.make_url("/docs/redirect-host"))
+            pattern_redirect = str(server.make_url("/docs/redirect-pattern"))
+            pages = await crawler.crawl(
+                [host_redirect, pattern_redirect],
+                same_domain_only=True,
+                include_patterns=["*/docs/*"],
+                exclude_patterns=["*/docs/private/*"],
+            )
+
+        self.assertEqual(pages, {})
+        self.assertEqual(requests, ["/docs/redirect-host", "/docs/redirect-pattern"])
+        self.assertEqual(set(crawler.failed_urls), {host_redirect, pattern_redirect})
+        for error in crawler.failed_urls.values():
+            self.assertIsInstance(error, RedirectError)
+            self.assertIn("outside the crawl scope", str(error))
+
+    async def test_redirect_loops_and_limits_stop_before_the_next_request(self) -> None:
+        requests: list[str] = []
+        locations = {
+            "a": "/redirect/b",
+            "b": "/redirect/a#top",
+            "first": "/redirect/second",
+            "second": "/redirect/third",
+        }
+
+        async def redirect_page(request: web.Request) -> web.Response:
+            name = request.match_info["name"]
+            requests.append(name)
+            if name in locations:
+                raise web.HTTPFound(locations[name])
+            return web.Response(text=name)
+
+        server = make_test_server()
+        server.app.router.add_get("/redirect/{name}", redirect_page)
+
+        async with server:
+            for entry, limit, reason, expected in (
+                ("a", 10, "redirect loop", ["a", "b"]),
+                ("first", 1, "redirect limit of 1", ["first", "second"]),
+            ):
+                with self.subTest(entry=entry, limit=limit):
+                    requests.clear()
+                    crawler = AsyncCrawler(max_redirects=limit)
+                    try:
+                        url = str(server.make_url(f"/redirect/{entry}"))
+                        with self.assertRaisesRegex(RedirectError, reason) as raised:
+                            await crawler.fetch_url(url)
+                        self.assertEqual(raised.exception.url, url)
+                    finally:
+                        await crawler.close()
+                    self.assertEqual(requests, expected)
+
+    async def test_redirect_reapplies_request_pacing_before_the_next_get(self) -> None:
+        now = 0.0
+        starts = []
+
+        def read_clock() -> float:
+            return now
+
+        async def advance_clock(delay: float) -> None:
+            nonlocal now
+            now += delay
+
+        async def page(request: web.Request) -> web.Response:
+            starts.append((request.path, now))
+            if request.path == "/start":
+                raise web.HTTPFound("/final")
+            return web.Response(text="Final page")
+
+        server = make_test_server()
+        server.app.router.add_get("/{path:.*}", page)
+        limiter = RateLimiter(2, clock=read_clock, sleep=advance_clock)
+        with patch("crawler.core.RateLimiter", return_value=limiter):
+            crawler = AsyncCrawler(max_concurrent=1, requests_per_second=2)
+        self.addAsyncCleanup(crawler.close)
+
+        async with server:
+            body = await crawler.fetch_url(str(server.make_url("/start")))
+
+        self.assertEqual(body, "Final page")
+        self.assertEqual(starts, [("/start", 0.0), ("/final", 0.5)])
+
     async def test_another_request_can_finish_while_html_is_being_parsed(self) -> None:
         test_timeout = 15
         loop = asyncio.get_running_loop()
@@ -477,8 +620,8 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         server.app.router.add_get("/pages/{name}", page_handler)
         fetch_and_parse = crawler.fetch_and_parse
 
-        async def observe_parse(url: str) -> ParsedPage:
-            page = await fetch_and_parse(url)
+        async def observe_parse(url: str, *, redirect_filter=None) -> ParsedPage:
+            page = await fetch_and_parse(url, redirect_filter=redirect_filter)
             if url.endswith("/fast"):
                 fast_parsed.set()
             return page

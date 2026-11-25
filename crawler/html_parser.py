@@ -2,10 +2,11 @@ import asyncio
 import logging
 from collections.abc import Callable
 from typing import TypedDict
-from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 from bs4.exceptions import ParserRejectedMarkup
+
+from .urls import resolve_http_url
 
 
 logger = logging.getLogger(__name__)
@@ -23,37 +24,11 @@ class ParsedPage(TypedDict):
     metadata: dict[str, str]
 
 
-def _resolve_http_url(base_url: str, reference: str) -> str | None:
-    reference = reference.strip()
-    if not reference:
-        return None
-
-    try:
-        source = urlsplit(reference)
-        if (source.scheme or reference.startswith("//")) and not source.hostname:
-            return None
-
-        url = urljoin(base_url, reference)
-        address = urlsplit(url)
-        host = address.hostname
-        if address.scheme not in {"http", "https"} or not host:
-            return None
-        if any(character.isspace() for character in host):
-            return None
-
-        # Accessing port validates its format and range.
-        _ = address.port
-    except ValueError:
-        return None
-
-    return url
-
-
 def _document_base_url(soup: BeautifulSoup, page_url: str) -> str:
     base = soup.select_one("base[href]")
     href = base.get("href") if base is not None else None
     if isinstance(href, str):
-        return _resolve_http_url(page_url, href) or page_url
+        return resolve_http_url(page_url, href) or page_url
     return page_url
 
 
@@ -122,7 +97,7 @@ class HTMLParser:
         for anchor in soup.select("a[href]"):
             href = anchor.get("href")
             if isinstance(href, str):
-                url = _resolve_http_url(base_url, href)
+                url = resolve_http_url(base_url, href)
                 if url is not None:
                     links.append(url)
         return links
@@ -134,7 +109,7 @@ class HTMLParser:
             source = image.get("src")
             if not isinstance(source, str):
                 continue
-            url = _resolve_http_url(base_url, source)
+            url = resolve_http_url(base_url, source)
             if url is None:
                 continue
 
