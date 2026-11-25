@@ -765,13 +765,13 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             start = str(server.make_url("/start"))
             pages = await crawler.crawl([start], on_progress=snapshots.append)
 
-        self.assertEqual(len(snapshots), 4)
+        self.assertEqual(len(snapshots), 5)
         self.assertEqual(
             [
                 (snapshot["processed"], snapshot["queued"], snapshot["failed"])
                 for snapshot in snapshots
             ],
-            [(0, 1, 0), (1, 2, 0), (1, 1, 1), (2, 0, 1)],
+            [(0, 1, 0), (1, 2, 0), (1, 1, 1), (2, 0, 1), (2, 0, 1)],
         )
         final = snapshots[-1]
         self.assertEqual(final["processed"], len(pages))
@@ -779,7 +779,79 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["visited"], 3)
         self.assertEqual(final["in_progress"], 0)
         self.assertEqual(snapshots[0]["pages_per_second"], 0.0)
+        self.assertIsNone(snapshots[0]["eta_seconds"])
+        self.assertAlmostEqual(snapshots[1]["eta_seconds"], 99 / snapshots[1]["pages_per_second"])
         self.assertGreater(final["pages_per_second"], 0.0)
+        self.assertEqual(final["budget_percent"], 3.0)
+        self.assertIsNone(final["eta_seconds"])
+        self.assertEqual([snapshot["finished"] for snapshot in snapshots], [False] * 4 + [True])
+
+    async def test_empty_crawl_publishes_only_the_actual_final_progress(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        for budget in (0, 10):
+            with self.subTest(budget=budget):
+                snapshots: list[CrawlProgress] = []
+                result = await crawler.crawl(
+                    max_pages=budget, on_progress=snapshots.append, progress_interval=0.01
+                )
+
+                self.assertEqual(result, {})
+                self.assertEqual(len(snapshots), 1)
+                final = snapshots[0]
+                self.assertTrue(final["finished"])
+                self.assertEqual(final["max_pages"], budget)
+                self.assertEqual(final["processed"], 0)
+                self.assertEqual(final["budget_percent"], 0.0)
+                self.assertEqual(final["pages_per_second"], 0.0)
+                self.assertEqual(final["active_requests"], 0)
+                self.assertIsNone(final["eta_seconds"])
+
+    async def test_live_progress_counts_active_requests_and_finishes_below_budget(self) -> None:
+        release = asyncio.Event()
+        active_seen = asyncio.Event()
+        snapshots: list[CrawlProgress] = []
+
+        async def slow_page(_request: web.Request) -> web.Response:
+            await release.wait()
+            return web.Response(text="<p>Page</p>", content_type="text/html")
+
+        def collect(snapshot: CrawlProgress) -> None:
+            snapshots.append(snapshot)
+            if snapshot["active_requests"] > 0:
+                active_seen.set()
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/slow-progress", slow_page)
+
+        async with server, asyncio.TaskGroup() as tasks:
+            url = str(server.make_url("/slow-progress"))
+            task = tasks.create_task(
+                crawler.crawl([url], max_pages=5, on_progress=collect, progress_interval=0.01)
+            )
+            try:
+                async with asyncio.timeout(15):
+                    await active_seen.wait()
+                    live = snapshots[-1]
+                    self.assertEqual(live["active_requests"], 1)
+                    self.assertEqual(live["in_progress"], 1)
+                    self.assertEqual(live["processed"], 0)
+                    self.assertIsNone(live["eta_seconds"])
+            finally:
+                release.set()
+            pages = await task
+
+        self.assertEqual(list(pages), [url])
+        final = snapshots[-1]
+        self.assertTrue(final["finished"])
+        self.assertEqual(final["processed"], 1)
+        self.assertEqual(final["max_pages"], 5)
+        self.assertEqual(final["budget_percent"], 20.0)
+        self.assertEqual(final["active_requests"], 0)
+        self.assertEqual(final["in_progress"], 0)
+        self.assertIsNone(final["eta_seconds"])
 
     async def test_crawl_continues_after_http_error(self) -> None:
         crawler = AsyncCrawler()

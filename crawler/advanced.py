@@ -62,7 +62,10 @@ class AdvancedCrawler:
         return cls(load_config(path))
 
     async def crawl(
-        self, *, on_progress: Callable[[CrawlProgress], None] | None = None
+        self,
+        *,
+        on_progress: Callable[[CrawlProgress], None] | None = None,
+        progress_interval: float | None = None,
     ) -> dict[str, PageRecord]:
         """Run the configured crawl and return the records it collected."""
         config = self._config
@@ -75,6 +78,7 @@ class AdvancedCrawler:
             include_patterns=config.include_patterns,
             exclude_patterns=config.exclude_patterns,
             on_progress=on_progress,
+            progress_interval=progress_interval,
         )
 
     def get_stats(self) -> CrawlStats:

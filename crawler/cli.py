@@ -3,9 +3,11 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 
 from .advanced import AdvancedCrawler
 from .config import CrawlerConfig, StorageConfig, load_config
+from .core import CrawlProgress
 from .logging_config import configure_logging
 
 
@@ -16,6 +18,7 @@ _OUTPUT_FORMATS = {
     ".sqlite": "sqlite",
     ".sqlite3": "sqlite",
 }
+_PROGRESS_INTERVAL = 1.0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -54,8 +57,30 @@ def _resolve_config(args: argparse.Namespace) -> CrawlerConfig:
 
 async def _run(config: CrawlerConfig) -> int:
     crawler = AdvancedCrawler(config)
+    last_reported = float("-inf")
+
+    def show_progress(progress: CrawlProgress) -> None:
+        nonlocal last_reported
+        now = perf_counter()
+        if not progress["finished"] and now - last_reported < _PROGRESS_INTERVAL:
+            return
+        last_reported = now
+
+        completed = progress["processed"] + progress["failed"]
+        phase = "Finished" if progress["finished"] else "Crawling"
+        eta = progress["eta_seconds"]
+        estimate = f"{eta:.1f} s" if eta is not None else "n/a"
+        print(
+            f"{phase} {completed}/{progress['max_pages']} pages "
+            f"({progress['budget_percent']:.1f}% of budget) | "
+            f"Active pages {progress['in_progress']} | "
+            f"active requests {progress['active_requests']} | "
+            f"{progress['pages_per_second']:.2f} pages/s | ETA {estimate}",
+            flush=True,
+        )
+
     try:
-        await crawler.crawl()
+        await crawler.crawl(on_progress=show_progress, progress_interval=_PROGRESS_INTERVAL)
     finally:
         await crawler.close()
 

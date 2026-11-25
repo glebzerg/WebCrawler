@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
+from math import isfinite
 from time import perf_counter
 from urllib.parse import urlsplit
 
@@ -38,6 +39,32 @@ _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 class CrawlProgress(QueueStats):
     pages_per_second: float
+    max_pages: int
+    budget_percent: float
+    active_requests: int
+    eta_seconds: float | None
+    finished: bool
+
+
+@asynccontextmanager
+async def _sample_progress(
+    report: Callable[[], None], interval: float | None
+) -> AsyncIterator[None]:
+    if interval is None:
+        yield
+        return
+
+    async def sample() -> None:
+        while True:
+            await asyncio.sleep(interval)
+            report()
+
+    async with asyncio.TaskGroup() as tasks:
+        sampler = tasks.create_task(sample())
+        try:
+            yield
+        finally:
+            sampler.cancel()
 
 
 @dataclass(frozen=True)
@@ -379,28 +406,44 @@ class AsyncCrawler:
         include_patterns: Sequence[str] = (),
         exclude_patterns: Sequence[str] = (),
         on_progress: Callable[[CrawlProgress], None] | None = None,
+        progress_interval: float | None = None,
     ) -> dict[str, PageRecord]:
         """Follow eligible links by depth until the page budget is used or the queue is empty."""
         if not isinstance(max_pages, int) or max_pages < 0:
             raise ValueError("max_pages must be a non-negative integer")
         if max_depth is not None and (not isinstance(max_depth, int) or max_depth < 0):
             raise ValueError("max_depth must be a non-negative integer or None")
+        if progress_interval is not None and (
+            not isfinite(progress_interval) or progress_interval <= 0
+        ):
+            raise ValueError("progress_interval must be positive and finite or None")
 
         queue = CrawlerQueue[PageRecord]()
         started_at = perf_counter()
 
-        def report_progress() -> None:
+        def report_progress(*, finished: bool = False) -> None:
             if on_progress is None:
                 return
             stats = queue.get_stats()
             elapsed = perf_counter() - started_at
             completed = stats["processed"] + stats["failed"]
             rate = completed / elapsed if elapsed > 0 else 0.0
-            on_progress({**stats, "pages_per_second": rate})
+            eta = (max_pages - completed) / rate if rate > 0 and not finished else None
+            on_progress(
+                {
+                    **stats,
+                    "pages_per_second": rate,
+                    "max_pages": max_pages,
+                    "budget_percent": completed / max_pages * 100 if max_pages else 0.0,
+                    "active_requests": self.active_requests,
+                    "eta_seconds": eta,
+                    "finished": finished,
+                }
+            )
 
         if max_pages == 0:
             self.failed_urls = {}
-            report_progress()
+            report_progress(finished=True)
             return {}
 
         allowed_hosts = (
@@ -463,11 +506,17 @@ class AsyncCrawler:
                 report_progress()
 
         with self._stats.measure():
-            async with self._page_write_queue() as write_queue:
+            async with (
+                _sample_progress(
+                    report_progress, progress_interval if on_progress is not None else None
+                ),
+                self._page_write_queue() as write_queue,
+            ):
                 async for url in self._sitemap_start_urls(sitemap_urls, host_allowed):
                     if should_enqueue(url):
                         queue.add_url(url)
-                report_progress()
+                if queue.next_depth() is not None:
+                    report_progress()
 
                 while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
                     worker_count = min(
@@ -478,6 +527,7 @@ class AsyncCrawler:
                             workers.create_task(crawl_level(depth, write_queue))
 
         self.failed_urls = failures
+        report_progress(finished=True)
         return {
             page["url"]: page for page in queue.processed_urls.values() if page is not None
         }

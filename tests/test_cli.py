@@ -135,6 +135,8 @@ class CommandLineEntryPointsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Processed 5 pages", from_config)
         self.assertIn("Processed 2 pages", with_override)
+        self.assertIn("Finished 5/5 pages (100.0% of budget)", from_config)
+        self.assertIn("Finished 2/2 pages (100.0% of budget)", with_override)
         self.assertEqual([record["url"] for record in saved_from_config], urls)
         self.assertEqual([record["url"] for record in saved_with_override], urls[:2])
         self.assertEqual(requested, [*paths, *paths[:2]])
