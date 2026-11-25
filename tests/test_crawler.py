@@ -141,6 +141,57 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "Hello from the test server")
         self.assertEqual(page["text"], text)
 
+    async def test_crawl_follows_links_and_visits_each_page_in_a_cycle_once(self) -> None:
+        requested = []
+
+        async def linked_page(request: web.Request) -> web.Response:
+            name = request.match_info["name"]
+            requested.append(name)
+            next_path = "/pages/b" if name == "a" else "/pages/a#return"
+            html = f'<title>Page {name.upper()}</title><a href="{next_path}">Next</a>'
+            return web.Response(text=html, content_type="text/html")
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/pages/{name}", linked_page)
+
+        async with server:
+            first = str(server.make_url("/pages/a"))
+            second = str(server.make_url("/pages/b"))
+            pages = await asyncio.wait_for(crawler.crawl([first]), timeout=5)
+
+        self.assertEqual(requested, ["a", "b"])
+        self.assertEqual(list(pages), [first, second])
+        self.assertEqual(pages[first]["title"], "Page A")
+        self.assertEqual(pages[first]["links"], [second])
+        self.assertEqual(pages[second]["title"], "Page B")
+
+    async def test_crawl_returns_empty_for_no_start_urls(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        with patch.object(crawler, "fetch_and_parse") as fetch:
+            self.assertEqual(await crawler.crawl([]), {})
+
+        fetch.assert_not_called()
+
+    async def test_crawl_continues_after_http_error(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            missing = str(server.make_url("/missing"))
+            ok = str(server.make_url("/ok"))
+            pages = await crawler.crawl([missing, ok])
+
+        self.assertEqual(list(pages), [ok])
+        self.assertEqual(pages[ok]["text"], "Hello from the test server")
+        self.assertEqual(set(crawler.failed_urls), {missing})
+        error = crawler.failed_urls[missing]
+        self.assertIsInstance(error, ClientResponseError)
+        self.assertEqual(error.status, 404)
+
     async def test_fetch_url_raises_http_error_with_status_and_url(self) -> None:
         crawler = AsyncCrawler()
         self.addAsyncCleanup(crawler.close)

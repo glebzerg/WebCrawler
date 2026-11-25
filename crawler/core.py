@@ -10,8 +10,10 @@ from aiohttp import (
 )
 
 from .html_parser import HTMLParser, ParsedPage
+from .queue import CrawlerQueue
 
 logger = logging.getLogger(__name__)
+_FETCH_ERRORS = (ClientError, TimeoutError, UnicodeDecodeError)
 
 
 class FetchConnectionError(ClientConnectionError):
@@ -102,7 +104,7 @@ class AsyncCrawler:
         pages: dict[str, str] = {}
         failures: dict[str, Exception] = {}
         for url, outcome in zip(batch_urls, outcomes, strict=True):
-            if isinstance(outcome, (ClientError, TimeoutError, UnicodeDecodeError)):
+            if isinstance(outcome, _FETCH_ERRORS):
                 failures[url] = outcome
             elif isinstance(outcome, BaseException):
                 raise outcome
@@ -111,6 +113,34 @@ class AsyncCrawler:
 
         self.failed_urls = failures
         return pages
+
+    async def crawl(self, start_urls: list[str]) -> dict[str, ParsedPage]:
+        """Follow discovered links one page at a time and return successful pages."""
+        queue = CrawlerQueue()
+        for url in start_urls:
+            queue.add_url(url)
+
+        failures: dict[str, Exception] = {}
+        while True:
+            url = await queue.get_next()
+            if url is None:
+                break
+
+            try:
+                page = await self.fetch_and_parse(url)
+            except _FETCH_ERRORS as error:
+                queue.mark_failed(url, str(error))
+                failures[url] = error
+                continue
+
+            queue.mark_processed(url, page)
+            for link in page["links"]:
+                queue.add_url(link)
+
+        self.failed_urls = failures
+        return {
+            page["url"]: page for page in queue.processed_urls.values() if page is not None
+        }
 
     async def close(self) -> None:
         self._closed = True
