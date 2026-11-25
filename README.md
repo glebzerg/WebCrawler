@@ -108,6 +108,7 @@ async def main():
         await crawler.close()
 
     await crawler.export_to_json("results/stats.json")
+    await crawler.export_to_html_report("results/report.html")
     print(crawler.get_stats()["saved_pages"])
 
 
@@ -115,6 +116,8 @@ asyncio.run(main())
 ```
 
 `storage.path` задаёт файл с записями страниц. `export_to_json()` записывает снимок статистики в отдельный файл. Экспорт после `close()` включает итог записи в хранилище.
+
+`export_to_html_report()` создаёт самостоятельный отчёт с таблицами и диаграммой HTTP-статусов. Файл `results/report.html` можно открыть в браузере на своём компьютере.
 
 ## Запуск из терминала
 

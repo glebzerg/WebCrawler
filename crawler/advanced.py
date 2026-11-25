@@ -6,6 +6,7 @@ from typing import Self
 
 from .config import CrawlerConfig, StorageConfig, load_config
 from .core import AsyncCrawler, CrawlProgress
+from .html_report import render_html_report
 from .page_record import PageRecord
 from .reporting import same_destination, write_report
 from .retry import RetryStrategy
@@ -86,6 +87,12 @@ class AdvancedCrawler:
         path = await self._report_path(filename)
         content = json.dumps(stats, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         await write_report(path, content)
+
+    async def export_to_html_report(self, filename: str | Path) -> None:
+        """Write a standalone HTML report from the crawl statistics."""
+        stats = self.get_stats()
+        path = await self._report_path(filename)
+        await write_report(path, render_html_report(stats))
 
     async def _report_path(self, filename: str | Path) -> Path:
         path = Path(filename)

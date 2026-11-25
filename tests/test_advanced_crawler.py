@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from aiohttp import web
+from bs4 import BeautifulSoup
 
 from crawler import AdvancedCrawler, CrawlProgress, CrawlerConfig, serialize_page
 from tests.http_server import make_test_server
@@ -42,6 +43,7 @@ class AdvancedCrawlerTest(unittest.IsolatedAsyncioTestCase):
             config_path = Path(directory) / "config.json"
             output = Path(directory) / "results" / "pages.json"
             report = Path(directory) / "reports" / "stats.json"
+            html_report = report.with_name("report.html")
             async with server:
                 config = {
                     "start_urls": [str(server.make_url("/docs/private"))],
@@ -70,10 +72,12 @@ class AdvancedCrawlerTest(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(list(pages), expected_urls)
                 await crawler.export_to_json(report)
+                await crawler.export_to_html_report(html_report)
                 with self.assertRaisesRegex(ValueError, "different files"):
                     await crawler.export_to_json(output)
                 saved = json.loads(output.read_text(encoding="utf-8"))
                 exported_stats = json.loads(report.read_text(encoding="utf-8"))
+                html = BeautifulSoup(html_report.read_text(encoding="utf-8"), "lxml")
 
         self.assertEqual(
             [path for path, _ in requests],
@@ -84,9 +88,39 @@ class AdvancedCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress[-1]["processed"], 2)
         stats = crawler.get_stats()
         self.assertEqual(exported_stats, stats)
+        status_rows = html.select("#status-counts tbody tr")
+        self.assertEqual(
+            {row.th.get_text(): int(row.td.get_text()) for row in status_rows},
+            exported_stats["status_counts"],
+        )
+        self.assertEqual(
+            {row.th.get_text(): int(row.meter["value"]) for row in status_rows},
+            exported_stats["status_counts"],
+        )
+        overview = {item.dt.get_text(): item.dd.get_text() for item in html.select(".metrics div")}
+        self.assertEqual(int(overview["Processed"]), exported_stats["processed_pages"])
         self.assertEqual(stats["saved_pages"], 2)
         self.assertEqual(stats["successful_retries"], 1)
         self.assertEqual(stats["blocked_pages"], 1)
+
+    async def test_html_report_escapes_urls_and_error_messages(self) -> None:
+        crawler = AdvancedCrawler(CrawlerConfig())
+        self.addAsyncCleanup(crawler.close)
+        stats = crawler.get_stats()
+        url = "https://example.test/<entry>?x=1&y=2"
+        message = 'Ошибка <example> & "кавычки"'
+        stats["permanent_errors"] = {url: message}
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "report.html"
+            with patch.object(crawler, "get_stats", return_value=stats):
+                await crawler.export_to_html_report(path)
+            html = BeautifulSoup(path.read_text(encoding="utf-8"), "lxml")
+
+        row = html.select_one("#reported-errors tbody tr")
+        self.assertEqual(row.th.get_text(), url)
+        self.assertEqual(row.td.get_text(), message)
+        self.assertIsNone(row.select_one("entry, example"))
+        self.assertIn("No HTTP responses", html.select_one("#status-counts").get_text())
 
     async def test_failed_report_replacement_preserves_the_existing_file(self) -> None:
         crawler = AdvancedCrawler(CrawlerConfig())
