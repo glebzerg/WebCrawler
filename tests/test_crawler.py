@@ -18,6 +18,7 @@ from crawler import (
     FetchConnectionError,
     HTMLParser,
     RateLimiter,
+    RobotsDisallowedError,
     RobotsUnavailableError,
 )
 from crawler.html_parser import ParsedPage
@@ -155,21 +156,21 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             requests += 1
             raise web.HTTPNotFound()
 
-        crawler = AsyncCrawler()
+        crawler = AsyncCrawler(respect_robots=True)
         self.addAsyncCleanup(crawler.close)
         server = make_test_server()
         server.app.router.add_get("/robots.txt", missing_robots)
 
         async with server:
             page_url = str(server.make_url("/ok"))
+            self.assertEqual(await crawler.fetch_url(page_url), "Hello from the test server")
             rules = await crawler.fetch_robots(page_url)
             self.assertTrue(rules.can_fetch(page_url))
-            self.assertEqual(await crawler.fetch_url(page_url), "Hello from the test server")
             self.assertIs(rules, await crawler.fetch_robots(page_url))
 
         self.assertEqual(requests, 1)
 
-    async def test_unavailable_robots_prevents_a_checked_page_request(self) -> None:
+    async def test_unavailable_robots_prevents_a_page_request(self) -> None:
         requests = []
 
         async def unavailable_robots(request: web.Request) -> web.Response:
@@ -180,7 +181,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             requests.append(request.path)
             return web.Response(text="Page")
 
-        crawler = AsyncCrawler()
+        crawler = AsyncCrawler(respect_robots=True)
         self.addAsyncCleanup(crawler.close)
         server = make_test_server()
         server.app.router.add_get("/robots.txt", unavailable_robots)
@@ -190,9 +191,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             page_url = str(server.make_url("/checked"))
             robots_url = str(server.make_url("/robots.txt"))
             with self.assertRaisesRegex(RobotsUnavailableError, "HTTP 503") as raised:
-                rules = await crawler.fetch_robots(page_url)
-                if rules.can_fetch(page_url):
-                    await crawler.fetch_url(page_url)
+                await crawler.fetch_url(page_url)
             with self.assertRaises(RobotsUnavailableError):
                 await crawler.fetch_robots(page_url)
 
@@ -200,6 +199,62 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status, 503)
         self.assertIsInstance(raised.exception.__cause__, ClientResponseError)
         self.assertEqual(requests, ["/robots.txt"])
+
+    async def test_respect_robots_blocks_paths_and_applies_crawl_delay(self) -> None:
+        now = 0.0
+        starts: list[tuple[str, float]] = []
+
+        def read_clock() -> float:
+            return now
+
+        async def advance_clock(delay: float) -> None:
+            nonlocal now
+            now += delay
+
+        async def tracked_page(request: web.Request) -> web.Response:
+            starts.append((request.path, now))
+            if request.path == "/robots.txt":
+                return web.Response(
+                    text="User-agent: ScoutBot\nDisallow: /private\nCrawl-delay: 1"
+                )
+            return web.Response(text="Page")
+
+        limiter = RateLimiter(2, min_delay=0.75, clock=read_clock, sleep=advance_clock)
+        with patch("crawler.core.RateLimiter", return_value=limiter):
+            crawler = AsyncCrawler(
+                max_concurrent=1,
+                requests_per_second=2,
+                min_delay=0.75,
+                user_agent="ScoutBot/1.0",
+                respect_robots=True,
+            )
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/{path:.*}", tracked_page)
+
+        async with server:
+            first = str(server.make_url("/public/first"))
+            second = str(server.make_url("/public/second"))
+            private = str(server.make_url("/private"))
+            with self.assertLogs("crawler.core", level="INFO") as captured:
+                pages = await asyncio.wait_for(
+                    crawler.fetch_urls([private, first, second]), timeout=15
+                )
+
+        self.assertEqual(pages, {first: "Page", second: "Page"})
+        self.assertEqual(set(crawler.failed_urls), {private})
+        self.assertIsInstance(crawler.failed_urls[private], RobotsDisallowedError)
+        self.assertTrue(
+            any(
+                record.event == "robots_blocked" and record.url == private
+                for record in captured.records
+            )
+        )
+        self.assertEqual(starts[0], ("/robots.txt", 0.0))
+        self.assertCountEqual(
+            [path for path, _ in starts[1:]], ["/public/first", "/public/second"]
+        )
+        self.assertEqual([time for _, time in starts], [0.0, 1.0, 2.0])
 
     async def test_fetch_and_parse_uses_final_url_for_relative_links(self) -> None:
         async def redirect(_request: web.Request) -> web.Response:

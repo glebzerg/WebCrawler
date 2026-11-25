@@ -11,6 +11,7 @@ from aiohttp import (
     ClientError,
     ClientSession,
     ClientTimeout,
+    InvalidURL,
 )
 
 from .html_parser import HTMLParser, ParsedPage
@@ -35,6 +36,12 @@ class FetchConnectionError(ClientConnectionError):
         super().__init__(f"Failed to connect to {url}")
 
 
+class RobotsDisallowedError(ClientError):
+    def __init__(self, url: str) -> None:
+        self.url = url
+        super().__init__(f"Blocked by robots.txt: {url}")
+
+
 class AsyncCrawler:
     def __init__(
         self,
@@ -46,6 +53,7 @@ class AsyncCrawler:
         min_delay: float = 0.0,
         jitter: float = 0.0,
         user_agent: str = "WebCrawler/0.1",
+        respect_robots: bool = False,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
     ) -> None:
@@ -58,7 +66,7 @@ class AsyncCrawler:
                 min_delay=min_delay,
                 jitter=jitter,
             )
-            if requests_per_second is not None or min_delay or jitter
+            if requests_per_second is not None or min_delay or jitter or respect_robots
             else None
         )
         self._timeout = ClientTimeout(
@@ -69,6 +77,7 @@ class AsyncCrawler:
         self._session: ClientSession | None = None
         self._closed = False
         self._user_agent = user_agent
+        self._respect_robots = respect_robots
         self._robots_cache = RobotsCache(self._fetch_robots_text)
         self.failed_urls: dict[str, Exception] = {}
 
@@ -97,7 +106,7 @@ class AsyncCrawler:
         return await self._robots_cache.get(url)
 
     async def _fetch_robots_text(self, url: str) -> str:
-        text, _ = await self._fetch_page(url)
+        text, _ = await self._fetch_page(url, check_robots=False)
         return text
 
     async def fetch_and_parse(self, url: str) -> ParsedPage:
@@ -106,7 +115,23 @@ class AsyncCrawler:
         page["url"] = url
         return page
 
-    async def _fetch_page(self, url: str) -> tuple[str, str]:
+    async def _fetch_page(self, url: str, *, check_robots: bool = True) -> tuple[str, str]:
+        crawl_delay = 0.0
+        if self._respect_robots and check_robots:
+            try:
+                rules = await self.fetch_robots(url)
+            except ValueError as error:
+                raise InvalidURL(url) from error
+
+            if not rules.can_fetch(url, self._user_agent):
+                logger.info(
+                    "Blocked by robots.txt: %s",
+                    url,
+                    extra={"event": "robots_blocked", "url": url},
+                )
+                raise RobotsDisallowedError(url)
+            crawl_delay = rules.get_crawl_delay(self._user_agent)
+
         try:
             host = urlsplit(url).hostname
         except ValueError:
@@ -115,7 +140,7 @@ class AsyncCrawler:
         async with self._semaphores.acquire(host):
             session = self._get_session()
             if self._rate_limiter is not None:
-                await self._rate_limiter.acquire(host)
+                await self._rate_limiter.acquire(host, crawl_delay=crawl_delay)
             logger.info(
                 "Started fetching %s",
                 url,

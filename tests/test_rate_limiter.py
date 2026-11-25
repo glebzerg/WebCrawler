@@ -114,6 +114,21 @@ class RateLimiterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(clock.read(), 0.75)
 
+    async def test_new_crawl_delay_applies_after_the_previous_start(self) -> None:
+        for per_domain, second_host_start in ((True, 0.0), (False, 0.5)):
+            with self.subTest(per_domain=per_domain):
+                clock = FakeClock()
+                limiter = RateLimiter(
+                    2, per_domain=per_domain, clock=clock.read, sleep=clock.sleep
+                )
+
+                await limiter.acquire("a.test")
+                await limiter.acquire("b.test")
+                self.assertEqual(clock.read(), second_host_start)
+                await limiter.acquire("a.test", crawl_delay=1.0)
+
+                self.assertEqual(clock.read(), 1.0)
+
     def test_rejects_invalid_request_rates(self) -> None:
         for rate in (0.0, -1.0, float("inf"), float("nan"), 5e-324):
             with self.subTest(rate=rate):

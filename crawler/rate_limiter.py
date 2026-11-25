@@ -9,7 +9,14 @@ from time import monotonic
 class _StartSchedule:
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
-        self.next_start: float | None = None
+        self.last_start: float | None = None
+        self.interval = 0.0
+        self.jitter = 0.0
+
+    def record_start(self, now: float, interval: float, jitter: float) -> None:
+        self.last_start = now
+        self.interval = interval
+        self.jitter = jitter
 
 
 class RateLimiter:
@@ -43,29 +50,33 @@ class RateLimiter:
         self._jitter = jitter
         self._schedules: dict[str | None, _StartSchedule] = {}
 
-    async def acquire(self, domain: str | None = None) -> None:
+    async def acquire(self, domain: str | None = None, *, crawl_delay: float = 0.0) -> None:
         """Wait for the next permitted start and reserve its time."""
+        if not isfinite(crawl_delay) or crawl_delay < 0:
+            raise ValueError("crawl_delay must be non-negative and finite")
+
         host = domain.lower() if domain is not None else None
         rate_schedule = self._schedule_for(host if self._per_domain else None)
         interval = self._interval
+        min_delay = max(self._min_delay, crawl_delay)
         host_schedule = None
         if self._per_domain or host is None:
-            interval = max(interval, self._min_delay)
-        elif self._min_delay > 0:
+            interval = max(interval, min_delay)
+        else:
             host_schedule = self._schedule_for(host)
 
         host_lock = host_schedule.lock if host_schedule is not None else nullcontext()
         async with host_lock:
             if host_schedule is not None:
                 # Let other hosts use the shared schedule during this host-specific wait.
-                await self._wait_for_start(host_schedule)
+                await self._wait_for_start(host_schedule, min_delay)
 
             async with rate_schedule.lock:
-                now = await self._wait_for_start(rate_schedule)
+                now = await self._wait_for_start(rate_schedule, interval)
                 extra = self._jitter * self._random_source() if self._jitter else 0.0
-                rate_schedule.next_start = now + (interval + extra)
+                rate_schedule.record_start(now, interval, extra)
                 if host_schedule is not None:
-                    host_schedule.next_start = now + (self._min_delay + extra)
+                    host_schedule.record_start(now, min_delay, extra)
 
     def _schedule_for(self, key: str | None) -> _StartSchedule:
         schedule = self._schedules.get(key)
@@ -74,9 +85,15 @@ class RateLimiter:
             self._schedules[key] = schedule
         return schedule
 
-    async def _wait_for_start(self, schedule: _StartSchedule) -> float:
+    async def _wait_for_start(self, schedule: _StartSchedule, interval: float) -> float:
         now = self._clock()
-        while schedule.next_start is not None and now < schedule.next_start:
-            await self._sleep(schedule.next_start - now)
+        if schedule.last_start is None:
+            return now
+
+        next_start = schedule.last_start + (
+            max(schedule.interval, interval) + schedule.jitter
+        )
+        while now < next_start:
+            await self._sleep(next_start - now)
             now = self._clock()
         return now
