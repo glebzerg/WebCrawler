@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock
 
@@ -91,3 +92,79 @@ class SitemapParserTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(crawler.failed_urls, {})
         self.assertEqual(captured.records[0].event, "sitemap_failed")
         self.assertEqual(captured.records[0].url, sitemap_url)
+
+    async def test_crawl_expands_cyclic_indexes_with_scope_robots_and_page_limits(self) -> None:
+        server = make_test_server()
+        requested: list[str] = []
+        namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+
+        async def respond(request: web.Request) -> web.Response:
+            path = request.path
+            requested.append(path)
+            if path == "/robots.txt":
+                return web.Response(text="User-agent: *\nDisallow: /blocked.xml")
+            if path in {"/index-a.xml", "/index-b.xml"}:
+                if path == "/index-a.xml":
+                    children = ["/index-b.xml", "/blocked.xml", "/broken.xml", "/pages.xml"]
+                    locations = [str(server.make_url(child)) for child in children]
+                    locations.append(str(server.make_url("/offsite.xml").with_host("localhost")))
+                else:
+                    locations = [
+                        f"{server.make_url('/index-a.xml')}#cycle",
+                        str(server.make_url("/pages.xml")),
+                    ]
+                entries = "".join(f"<sitemap><loc>{url}</loc></sitemap>" for url in locations)
+                xml = f'<sitemapindex xmlns="{namespace}">{entries}</sitemapindex>'
+                return web.Response(text=xml, content_type="application/xml")
+            if path == "/broken.xml":
+                return web.Response(text="<broken>", content_type="application/xml")
+            if path == "/pages.xml":
+                paths = ("/private", "/public/excluded", "/public/one", "/public/two", "/public/extra")
+                entries = "".join(f"<url><loc>{server.make_url(url)}</loc></url>" for url in paths)
+                return web.Response(
+                    text=f'<urlset xmlns="{namespace}">{entries}</urlset>',
+                    content_type="application/xml",
+                )
+            return web.Response(text="<p>Page</p>", content_type="text/html")
+
+        server.app.router.add_get("/{path:.*}", respond)
+        crawler = AsyncCrawler(max_concurrent=1, respect_robots=True)
+        self.addAsyncCleanup(crawler.close)
+
+        async with server:
+            to_visit = [str(server.make_url(path)) for path in ("/public/one", "/public/two")]
+            failed_maps = {str(server.make_url(path)) for path in ("/blocked.xml", "/broken.xml")}
+            with self.assertLogs("crawler.core", level="WARNING") as captured:
+                async with asyncio.timeout(15):
+                    pages = await crawler.crawl(
+                        sitemap_urls=[
+                            str(server.make_url("/index-a.xml")),
+                            str(server.make_url("/index-b.xml")),
+                        ],
+                        max_pages=2,
+                        max_depth=0,
+                        same_domain_only=True,
+                        include_patterns=("*/public/*",),
+                        exclude_patterns=("*/excluded",),
+                    )
+
+        self.assertEqual(list(pages), to_visit)
+        self.assertEqual(
+            requested,
+            [
+                "/robots.txt",
+                "/index-a.xml",
+                "/index-b.xml",
+                "/pages.xml",
+                "/broken.xml",
+                "/public/one",
+                "/public/two",
+            ],
+        )
+        self.assertEqual(crawler.get_stats()["http_attempts"], len(requested))
+        self.assertEqual(crawler.get_stats()["processed_pages"], 2)
+        self.assertEqual(crawler.failed_urls, {})
+        self.assertEqual(
+            {record.url for record in captured.records if record.event == "sitemap_failed"},
+            failed_maps,
+        )

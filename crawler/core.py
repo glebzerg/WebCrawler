@@ -17,7 +17,7 @@ from aiohttp import (
     InvalidURL,
 )
 
-from .errors import ParseError, classify_error
+from .errors import classify_error
 from .html_parser import HTMLParser
 from .page_record import PageRecord
 from .queue import CrawlerQueue, QueueStats
@@ -481,20 +481,17 @@ class AsyncCrawler:
             response = await self._fetch_page(url, redirect_filter=host_allowed)
             return response.text
 
-        parser = SitemapParser(fetch_text)
-        for sitemap_url in dict.fromkeys(sitemap_urls):
-            try:
-                urls = await parser.fetch_sitemap(sitemap_url)
-            except (*_FETCH_ERRORS, ParseError) as error:
-                logger.warning(
-                    "Skipping sitemap %s: %s",
-                    sitemap_url,
-                    error,
-                    extra={"event": "sitemap_failed", "url": sitemap_url},
-                )
-                continue
-            for url in urls:
-                yield url
+        def report_error(url: str, error: Exception) -> None:
+            logger.warning(
+                "Skipping sitemap %s: %s",
+                url,
+                error,
+                extra={"event": "sitemap_failed", "url": url},
+            )
+
+        parser = SitemapParser(fetch_text, allow_sitemap=host_allowed)
+        async for url in parser.iter_page_urls(sitemap_urls, on_error=report_error):
+            yield url
 
     @asynccontextmanager
     async def _page_write_queue(
