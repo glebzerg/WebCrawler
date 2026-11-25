@@ -10,7 +10,7 @@ import aiofiles
 import aiofiles.os
 from aiofiles.threadpool.text import AsyncTextIOWrapper
 
-from .page_record import PageRecord, serialize_page
+from .page_record import PageRecord, serialize_page, serialize_table_row
 
 
 class DataStorage(ABC):
@@ -108,12 +108,7 @@ class CSVStorage(_TextFileStorage):
             if self._closed:
                 raise RuntimeError("CSVStorage is closed")
 
-            row = serialize_page(data)
-            for name, value in row.items():
-                if isinstance(value, (dict, list)):
-                    row[name] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-            chunk = self._format_csv(row)
+            chunk = self._format_csv(serialize_table_row(data))
             file = await self._get_file()
             await file.write(chunk)
             self._has_records = True
