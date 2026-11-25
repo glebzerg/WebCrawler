@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from math import isfinite
 from random import random
-from time import monotonic
+from time import perf_counter
 
 
 class _StartSchedule:
@@ -27,7 +27,7 @@ class RateLimiter:
         *,
         min_delay: float = 0.0,
         jitter: float = 0.0,
-        clock: Callable[[], float] = monotonic,
+        clock: Callable[[], float] = perf_counter,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random_source: Callable[[], float] = random,
     ) -> None:
