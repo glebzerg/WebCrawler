@@ -2,7 +2,7 @@ import asyncio
 import json
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -69,8 +69,19 @@ class CommandLineOptionsTest(unittest.TestCase):
 
         self.assertEqual(stopped.exception.code, 0)
         for flag in ("--urls", "--max-pages", "--max-depth", "--output", "--config",
-                     "--respect-robots", "--rate-limit"):
+                     "--respect-robots", "--rate-limit", "--stats-json", "--report-html"):
             self.assertIn(flag, output.getvalue())
+
+    def test_rejects_using_the_same_file_for_both_reports(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "report"
+            output = StringIO()
+            with redirect_stderr(output), self.assertRaises(SystemExit) as stopped:
+                main(["--stats-json", str(path), "--report-html", str(path)])
+
+            self.assertEqual(stopped.exception.code, 2)
+            self.assertIn("different files", output.getvalue())
+            self.assertFalse(path.exists())
 
 
 class CommandLineEntryPointsTest(unittest.IsolatedAsyncioTestCase):

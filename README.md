@@ -125,11 +125,14 @@ asyncio.run(main())
 .\.venv\Scripts\python.exe -m crawler --help
 .\.venv\Scripts\python.exe crawler.py --config config.json --max-pages 2
 .\.venv\Scripts\python.exe -m crawler --urls https://example.com --output results/pages.json
+.\.venv\Scripts\python.exe -m crawler --config config.json --stats-json results/stats.json --report-html results/report.html
 ```
 
 Обе команды используют те же настройки, что и `AdvancedCrawler`. Явно переданный флаг переопределяет соответствующее поле JSON. `--urls` заменяет список `start_urls`, а `--respect-robots` и `--no-respect-robots` задают режим для `robots.txt`.
 
 Во время обхода CLI показывает долю использованного бюджета, активные страницы и запросы, скорость и оценку времени до `max_pages`. Если очередь опустеет раньше, последняя строка показывает фактическое число завершённых страниц.
+
+`--stats-json` и `--report-html` сохраняют итоговые отчёты после закрытия хранилища. Для отчётов нужны отдельные пути.
 
 Если в конфиге указано хранилище, `--output` меняет его путь. При запуске без настроенного хранилища формат определяется по расширению файла. Поддерживаются `.jsonl`, `.csv`, `.db`, `.sqlite` и `.sqlite3`. Для остальных расширений используется JSON.
 
