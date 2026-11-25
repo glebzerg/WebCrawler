@@ -1,3 +1,4 @@
+from .advanced import AdvancedCrawler
 from .config import CrawlerConfig, StorageConfig, load_config
 from .core import (
     AsyncCrawler,
@@ -28,6 +29,7 @@ from .stats import CrawlStats
 from .storage import CSVStorage, DataStorage, JSONLStorage, JSONStorage
 
 __all__ = [
+    "AdvancedCrawler",
     "AsyncCrawler",
     "BackoffPolicy",
     "CSVStorage",

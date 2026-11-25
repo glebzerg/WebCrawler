@@ -91,3 +91,24 @@ py -3.12 -m venv .venv
 - `max_pages` по умолчанию равен 100, `max_concurrent` — 10. `max_depth` и `max_per_host` принимают `null`, если отдельный лимит не задан. `rate_limit` задаёт запросы в секунду, а `null` отключает этот лимит. `per_domain` включает отдельный лимит для каждого хоста.
 - `respect_robots` по умолчанию равен `true`. Паузы `min_delay` и `jitter`, а также `connect_timeout`, `read_timeout` и `total_timeout` задаются в секундах. `max_redirects` и `max_retries` ограничивают редиректы и повторы HTTP-запросов.
 - `storage` принимает `null` или объект с `path` и форматом `json`, `jsonl`, `csv` или `sqlite`. Для CSV можно указать `encoding`, для SQLite — `batch_size`. Относительный путь считается от рабочей папки запуска. `storage_queue_size` и `storage_max_retries` управляют очередью записи и числом повторов.
+
+Для запуска из Python передай путь к файлу в `AdvancedCrawler.from_config()`.
+
+```python
+import asyncio
+
+from crawler import AdvancedCrawler
+
+
+async def main():
+    crawler = AdvancedCrawler.from_config("config.json")
+    try:
+        await crawler.crawl()
+    finally:
+        await crawler.close()
+
+    print(crawler.get_stats()["saved_pages"])
+
+
+asyncio.run(main())
+```
