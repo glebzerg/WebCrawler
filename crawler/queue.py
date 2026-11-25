@@ -27,9 +27,13 @@ class CrawlerQueue:
         job = await self.get_next_job()
         return job[0] if job is not None else None
 
-    async def get_next_job(self) -> tuple[str, int] | None:
-        """Take the next URL and its depth, or return None if the queue is empty."""
-        if not self._pending:
+    def next_depth(self) -> int | None:
+        return self._pending[0][0] if self._pending else None
+
+    async def get_next_job(self, *, max_depth: int | None = None) -> tuple[str, int] | None:
+        """Take the next job if its depth is within the requested level."""
+        depth = self.next_depth()
+        if depth is None or (max_depth is not None and depth > max_depth):
             return None
 
         depth, _, _, key, url = heappop(self._pending)

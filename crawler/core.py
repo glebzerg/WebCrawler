@@ -37,6 +37,7 @@ class AsyncCrawler:
         if not isinstance(max_concurrent, int) or max_concurrent < 1:
             raise ValueError("max_concurrent must be a positive integer")
 
+        self._max_concurrent = max_concurrent
         self._request_slots = asyncio.Semaphore(max_concurrent)
         self._timeout = ClientTimeout(
             total=5 * 60,
@@ -156,24 +157,32 @@ class AsyncCrawler:
                 queue.add_url(url)
 
         failures: dict[str, Exception] = {}
-        while True:
-            job = await queue.get_next_job()
-            if job is None:
-                break
-            url, depth = job
 
-            try:
-                page = await self.fetch_and_parse(url)
-            except _FETCH_ERRORS as error:
-                queue.mark_failed(url, str(error))
-                failures[url] = error
-                continue
+        async def crawl_level(depth: int) -> None:
+            while True:
+                job = await queue.get_next_job(max_depth=depth)
+                if job is None:
+                    return
+                url, _ = job
 
-            queue.mark_processed(url, page)
-            if max_depth is None or depth < max_depth:
-                for link in page["links"]:
-                    if should_enqueue(link):
-                        queue.add_url(link, depth=depth + 1)
+                try:
+                    page = await self.fetch_and_parse(url)
+                except _FETCH_ERRORS as error:
+                    queue.mark_failed(url, str(error))
+                    failures[url] = error
+                    continue
+
+                queue.mark_processed(url, page)
+                if max_depth is None or depth < max_depth:
+                    for link in page["links"]:
+                        if should_enqueue(link):
+                            queue.add_url(link, depth=depth + 1)
+
+        while (depth := queue.next_depth()) is not None:
+            worker_count = min(self._max_concurrent, queue.get_stats()["queued"])
+            async with asyncio.TaskGroup() as workers:
+                for _ in range(worker_count):
+                    workers.create_task(crawl_level(depth))
 
         self.failed_urls = failures
         return {

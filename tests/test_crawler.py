@@ -223,7 +223,10 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             next_after_x = str(server.make_url("/graph/y"))
             pages = await asyncio.wait_for(crawler.crawl([start], max_depth=3), timeout=5)
 
-        self.assertEqual(requested, ["a", "b", "c", "d", "x", "y"])
+        self.assertEqual(requested[:1], ["a"])
+        self.assertCountEqual(requested[1:3], ["b", "c"])
+        self.assertCountEqual(requested[3:5], ["d", "x"])
+        self.assertEqual(requested[5:], ["y"])
         self.assertIn(next_after_x, pages)
 
     async def test_crawl_rejects_negative_max_depth(self) -> None:
@@ -267,16 +270,65 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
                 exclude_patterns=["*/docs/private/*"],
             )
 
-        self.assertEqual(list(pages), [first, second, next_page])
-        self.assertEqual(
-            requested,
-            [
-                ("127.0.0.1", "/docs/first"),
-                ("localhost", "/docs/second"),
-                ("127.0.0.1", "/docs/next"),
-            ],
+        self.assertCountEqual(pages, [first, second, next_page])
+        self.assertCountEqual(
+            requested[:2],
+            [("127.0.0.1", "/docs/first"), ("localhost", "/docs/second")],
         )
+        self.assertEqual(requested[2:], [("127.0.0.1", "/docs/next")])
         self.assertEqual(crawler.failed_urls, {})
+
+    async def test_crawl_waits_for_active_workers_before_advancing_levels(self) -> None:
+        slow_started = asyncio.Event()
+        allow_slow_response = asyncio.Event()
+        next_level_started = asyncio.Event()
+        fast_parsed = asyncio.Event()
+
+        async def page_handler(request: web.Request) -> web.Response:
+            name = request.match_info["name"]
+            if name == "slow":
+                slow_started.set()
+                await allow_slow_response.wait()
+                text = '<a href="/pages/from-slow">Found by slow page</a>'
+            elif name == "fast":
+                await slow_started.wait()
+                text = '<a href="/pages/from-fast">Found by fast page</a>'
+            else:
+                next_level_started.set()
+                text = name
+            return web.Response(text=text, content_type="text/html")
+
+        crawler = AsyncCrawler(max_concurrent=2)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/pages/{name}", page_handler)
+        fetch_and_parse = crawler.fetch_and_parse
+
+        async def observe_parse(url: str) -> ParsedPage:
+            page = await fetch_and_parse(url)
+            if url.endswith("/fast"):
+                fast_parsed.set()
+            return page
+
+        async with server:
+            slow = str(server.make_url("/pages/slow"))
+            fast = str(server.make_url("/pages/fast"))
+            from_slow = str(server.make_url("/pages/from-slow"))
+            from_fast = str(server.make_url("/pages/from-fast"))
+            with patch.object(crawler, "fetch_and_parse", side_effect=observe_parse):
+                crawl_task = asyncio.create_task(crawler.crawl([slow, fast]))
+                try:
+                    await asyncio.wait_for(fast_parsed.wait(), timeout=5)
+                    self.assertFalse(crawl_task.done())
+                    with self.assertRaises(TimeoutError):
+                        await asyncio.wait_for(next_level_started.wait(), timeout=0.1)
+                finally:
+                    allow_slow_response.set()
+                    slow_started.set()
+                    pages = await asyncio.wait_for(crawl_task, timeout=5)
+
+        self.assertCountEqual(pages, [slow, fast, from_slow, from_fast])
+        self.assertTrue(next_level_started.is_set())
 
     async def test_crawl_continues_after_http_error(self) -> None:
         crawler = AsyncCrawler()
