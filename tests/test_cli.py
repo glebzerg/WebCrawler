@@ -30,6 +30,7 @@ class CommandLineOptionsTest(unittest.TestCase):
                         "max_depth": 4,
                         "rate_limit": 1,
                         "respect_robots": True,
+                        "log_file": None,
                         "storage": {"path": "old.csv", "format": "csv", "encoding": "cp1251"},
                     }
                 ),
@@ -104,6 +105,7 @@ class CommandLineEntryPointsTest(unittest.IsolatedAsyncioTestCase):
             config_path = Path(directory) / "config.json"
             configured_output = Path(directory) / "configured.json"
             override_output = Path(directory) / "override.json"
+            log_path = Path(directory) / "crawler.log"
             async with server:
                 paths = [f"/pages/{number}" for number in range(5)]
                 urls = [str(server.make_url(path)) for path in paths]
@@ -114,6 +116,7 @@ class CommandLineEntryPointsTest(unittest.IsolatedAsyncioTestCase):
                             "max_concurrent": 1,
                             "max_pages": 5,
                             "respect_robots": False,
+                            "log_file": str(log_path),
                             "storage": {"path": str(configured_output)},
                         }
                     ),
@@ -128,9 +131,12 @@ class CommandLineEntryPointsTest(unittest.IsolatedAsyncioTestCase):
 
             saved_from_config = json.loads(configured_output.read_text(encoding="utf-8"))
             saved_with_override = json.loads(override_output.read_text(encoding="utf-8"))
+            events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
         self.assertIn("Processed 5 pages", from_config)
         self.assertIn("Processed 2 pages", with_override)
         self.assertEqual([record["url"] for record in saved_from_config], urls)
         self.assertEqual([record["url"] for record in saved_with_override], urls[:2])
         self.assertEqual(requested, [*paths, *paths[:2]])
+        self.assertEqual(sum(event["event"] == "fetch_started" for event in events), 7)
+        self.assertEqual(sum(event["event"] == "fetch_succeeded" for event in events), 7)

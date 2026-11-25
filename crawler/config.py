@@ -83,6 +83,10 @@ class CrawlerConfig:
     storage_queue_size: int = 10
     storage_max_retries: int = 2
     storage: StorageConfig | None = None
+    log_file: str | None = "results/crawler.log"
+    log_level: str = "INFO"
+    log_max_bytes: int = 1_000_000
+    log_backup_count: int = 3
 
     def __post_init__(self) -> None:
         for name in ("start_urls", "sitemap_urls"):
@@ -126,6 +130,16 @@ class CrawlerConfig:
             raise ValueError("user_agent must be a non-empty HTTP header value")
         if self.storage is not None and not isinstance(self.storage, StorageConfig):
             raise ValueError("storage must be a StorageConfig or None")
+        if self.log_file is not None and (
+            not isinstance(self.log_file, str) or not self.log_file.strip() or "\0" in self.log_file
+        ):
+            raise ValueError("log_file must be a non-empty file path or null")
+        levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+        if not isinstance(self.log_level, str) or self.log_level.upper() not in levels:
+            raise ValueError(f"log_level must be one of {', '.join(levels)}")
+        object.__setattr__(self, "log_level", self.log_level.upper())
+        _check_int("log_max_bytes", self.log_max_bytes, 1)
+        _check_int("log_backup_count", self.log_backup_count, 1)
 
 
 def _read_options(data: object, config_type: type, name: str) -> dict[str, Any]:

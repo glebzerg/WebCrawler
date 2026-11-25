@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .advanced import AdvancedCrawler
 from .config import CrawlerConfig, StorageConfig, load_config
+from .logging_config import configure_logging
 
 
 _OUTPUT_FORMATS = {
@@ -73,10 +74,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = _resolve_config(args)
+        with configure_logging(config):
+            return asyncio.run(_run(config))
     except (OSError, ValueError) as error:
         parser.error(str(error))
-
-    try:
-        return asyncio.run(_run(config))
     except KeyboardInterrupt:
         return 130

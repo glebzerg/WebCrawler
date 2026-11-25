@@ -16,6 +16,7 @@ from .errors import (
     classify_error,
 )
 from .html_parser import HTMLParser
+from .logging_config import configure_logging
 from .page_record import PageRecord, serialize_page
 from .queue import CrawlerQueue
 from .rate_limiter import RateLimiter
@@ -60,6 +61,7 @@ __all__ = [
     "StorageConfig",
     "TransientError",
     "classify_error",
+    "configure_logging",
     "load_config",
     "serialize_page",
 ]
