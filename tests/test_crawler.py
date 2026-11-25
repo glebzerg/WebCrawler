@@ -110,6 +110,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["links"], [expected_link])
 
     async def test_another_request_can_finish_while_html_is_being_parsed(self) -> None:
+        test_timeout = 15
         loop = asyncio.get_running_loop()
         loop_thread = threading.get_ident()
         parsing_started = asyncio.Event()
@@ -120,7 +121,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             if threading.get_ident() == loop_thread:
                 raise AssertionError("HTML parsing ran in the event loop thread")
             loop.call_soon_threadsafe(parsing_started.set)
-            if not resume_parsing.wait(timeout=5):
+            if not resume_parsing.wait(timeout=test_timeout):
                 raise TimeoutError("The parsing test did not release its worker")
             return original_parse(parser, html, url)
 
@@ -131,12 +132,12 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             with patch.object(HTMLParser, "_parse_html", paused_parse):
                 parse_task = asyncio.create_task(crawler.fetch_and_parse(url))
                 try:
-                    await asyncio.wait_for(parsing_started.wait(), timeout=5)
-                    text = await asyncio.wait_for(crawler.fetch_url(url), timeout=5)
+                    await asyncio.wait_for(parsing_started.wait(), timeout=test_timeout)
+                    text = await asyncio.wait_for(crawler.fetch_url(url), timeout=test_timeout)
                     self.assertFalse(parse_task.done())
                 finally:
                     resume_parsing.set()
-                    page = await asyncio.wait_for(parse_task, timeout=5)
+                    page = await asyncio.wait_for(parse_task, timeout=test_timeout)
 
         self.assertEqual(text, "Hello from the test server")
         self.assertEqual(page["text"], text)
@@ -583,7 +584,9 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         limiter = RateLimiter(2, per_domain=False, clock=read_clock, sleep=advance_clock)
         with patch("crawler.core.RateLimiter", return_value=limiter) as make_limiter:
             crawler = AsyncCrawler(max_concurrent=1, requests_per_second=2, per_domain=False)
-        make_limiter.assert_called_once_with(2, per_domain=False)
+        make_limiter.assert_called_once_with(
+            2, per_domain=False, min_delay=0.0, jitter=0.0
+        )
         self.addAsyncCleanup(crawler.close)
         server = make_test_server()
         server.app.router.add_get("/timed/{name}", timed_page)

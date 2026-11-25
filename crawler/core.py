@@ -41,14 +41,21 @@ class AsyncCrawler:
         max_per_host: int | None = None,
         requests_per_second: float | None = None,
         per_domain: bool = True,
+        min_delay: float = 0.0,
+        jitter: float = 0.0,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
     ) -> None:
         self._max_concurrent = max_concurrent
         self._semaphores = SemaphoreManager(max_concurrent, max_per_host)
         self._rate_limiter = (
-            RateLimiter(requests_per_second, per_domain=per_domain)
-            if requests_per_second is not None
+            RateLimiter(
+                requests_per_second,
+                per_domain=per_domain,
+                min_delay=min_delay,
+                jitter=jitter,
+            )
+            if requests_per_second is not None or min_delay or jitter
             else None
         )
         self._timeout = ClientTimeout(

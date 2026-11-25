@@ -67,8 +67,62 @@ class RateLimiterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(clock.read(), 10.5)
         self.assertEqual(clock.delays, [0.5])
 
+    async def test_jitter_is_added_to_the_stricter_interval(self) -> None:
+        for min_delay, expected in ((1.0, 1.2), (0.1, 0.7)):
+            with self.subTest(min_delay=min_delay):
+                clock = FakeClock()
+                limiter = RateLimiter(
+                    2,
+                    min_delay=min_delay,
+                    jitter=0.4,
+                    clock=clock.read,
+                    sleep=clock.sleep,
+                    random_source=lambda: 0.5,
+                )
+
+                await limiter.acquire("a.test")
+                self.assertEqual(clock.read(), 0.0)
+                await limiter.acquire("a.test")
+
+                self.assertAlmostEqual(clock.read(), expected)
+                self.assertEqual(clock.delays, [expected])
+
+    async def test_global_rate_does_not_apply_one_hosts_min_delay_to_another(self) -> None:
+        clock = FakeClock()
+        limiter = RateLimiter(
+            2,
+            per_domain=False,
+            min_delay=2.0,
+            jitter=0.4,
+            clock=clock.read,
+            sleep=clock.sleep,
+            random_source=lambda: 0.5,
+        )
+
+        await limiter.acquire("a.test")
+        await limiter.acquire("b.test")
+        self.assertAlmostEqual(clock.read(), 0.7)
+        await limiter.acquire("a.test")
+        self.assertAlmostEqual(clock.read(), 2.2)
+
+    async def test_min_delay_works_without_a_request_rate(self) -> None:
+        clock = FakeClock()
+        limiter = RateLimiter(None, min_delay=0.75, clock=clock.read, sleep=clock.sleep)
+
+        await limiter.acquire("a.test")
+        await limiter.acquire("a.test")
+
+        self.assertEqual(clock.read(), 0.75)
+
     def test_rejects_invalid_request_rates(self) -> None:
         for rate in (0.0, -1.0, float("inf"), float("nan"), 5e-324):
             with self.subTest(rate=rate):
                 with self.assertRaisesRegex(ValueError, "requests_per_second"):
                     RateLimiter(rate)
+
+    def test_rejects_negative_or_non_finite_delays(self) -> None:
+        for name in ("min_delay", "jitter"):
+            for value in (-1.0, float("inf"), float("nan")):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaisesRegex(ValueError, name):
+                        RateLimiter(**{name: value})
