@@ -23,15 +23,26 @@ class DataStorage(ABC):
         """Finish writing and release any resources held by the storage."""
 
 
-class JSONStorage(DataStorage):
-    """Write a UTF-8 JSON array that is finalized on close."""
-
+class _TextFileStorage(DataStorage):
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._file: AsyncTextIOWrapper | None = None
-        self._has_records = False
         self._closed = False
         self._lock = asyncio.Lock()
+
+    async def _get_file(self) -> AsyncTextIOWrapper:
+        if self._file is None:
+            await aiofiles.os.makedirs(self._path.parent, exist_ok=True)
+            self._file = await aiofiles.open(self._path, "w", encoding="utf-8", newline="\n")
+        return self._file
+
+
+class JSONStorage(_TextFileStorage):
+    """Write a UTF-8 JSON array that is finalized on close."""
+
+    def __init__(self, path: str | Path) -> None:
+        super().__init__(path)
+        self._has_records = False
 
     async def save(self, data: PageRecord) -> None:
         async with self._lock:
@@ -56,8 +67,24 @@ class JSONStorage(DataStorage):
             finally:
                 await file.close()
 
-    async def _get_file(self) -> AsyncTextIOWrapper:
-        if self._file is None:
-            await aiofiles.os.makedirs(self._path.parent, exist_ok=True)
-            self._file = await aiofiles.open(self._path, "w", encoding="utf-8", newline="\n")
-        return self._file
+
+class JSONLStorage(_TextFileStorage):
+    """Write one UTF-8 JSON object per line."""
+
+    async def save(self, data: PageRecord) -> None:
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("JSONLStorage is closed")
+
+            record = json.dumps(serialize_page(data), ensure_ascii=False, separators=(",", ":"))
+            file = await self._get_file()
+            await file.write(record + "\n")
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+
+            file = await self._get_file()
+            self._closed = True
+            await file.close()
