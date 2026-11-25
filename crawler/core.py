@@ -122,15 +122,21 @@ class AsyncCrawler:
     async def crawl(
         self,
         start_urls: list[str],
+        max_pages: int = 100,
         *,
         max_depth: int | None = None,
         same_domain_only: bool = False,
         include_patterns: Sequence[str] = (),
         exclude_patterns: Sequence[str] = (),
     ) -> dict[str, ParsedPage]:
-        """Follow links by depth and apply glob patterns to candidate URL keys."""
+        """Follow eligible links by depth until the page budget is used or the queue is empty."""
+        if not isinstance(max_pages, int) or max_pages < 0:
+            raise ValueError("max_pages must be a non-negative integer")
         if max_depth is not None and (not isinstance(max_depth, int) or max_depth < 0):
             raise ValueError("max_depth must be a non-negative integer or None")
+        if max_pages == 0:
+            self.failed_urls = {}
+            return {}
 
         allowed_hosts = (
             {urlsplit(url).hostname for url in start_urls} - {None}
@@ -157,12 +163,16 @@ class AsyncCrawler:
                 queue.add_url(url)
 
         failures: dict[str, Exception] = {}
+        remaining_pages = max_pages
 
         async def crawl_level(depth: int) -> None:
-            while True:
+            nonlocal remaining_pages
+            while remaining_pages > 0:
                 job = await queue.get_next_job(max_depth=depth)
                 if job is None:
                     return
+                # Dequeuing does not suspend, so the slot is reserved before the next worker runs.
+                remaining_pages -= 1
                 url, _ = job
 
                 try:
@@ -178,8 +188,10 @@ class AsyncCrawler:
                         if should_enqueue(link):
                             queue.add_url(link, depth=depth + 1)
 
-        while (depth := queue.next_depth()) is not None:
-            worker_count = min(self._max_concurrent, queue.get_stats()["queued"])
+        while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
+            worker_count = min(
+                self._max_concurrent, queue.get_stats()["queued"], remaining_pages
+            )
             async with asyncio.TaskGroup() as workers:
                 for _ in range(worker_count):
                     workers.create_task(crawl_level(depth))

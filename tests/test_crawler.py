@@ -330,6 +330,65 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual(pages, [slow, fast, from_slow, from_fast])
         self.assertTrue(next_level_started.is_set())
 
+    async def test_crawl_reserves_budget_before_requests_and_counts_failures(self) -> None:
+        three_started = asyncio.Event()
+        requested = []
+
+        async def page_handler(request: web.Request) -> web.Response:
+            name = request.match_info["name"]
+            requested.append(name)
+            if len(requested) == 3:
+                three_started.set()
+            await three_started.wait()
+            if name == "0":
+                return web.Response(status=500)
+            return web.Response(text=name)
+
+        crawler = AsyncCrawler(max_concurrent=10)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/budget/{name}", page_handler)
+
+        async with server:
+            urls = [str(server.make_url(f"/budget/{number}")) for number in range(12)]
+            try:
+                pages = await asyncio.wait_for(crawler.crawl(urls, max_pages=3), timeout=5)
+            finally:
+                three_started.set()
+
+        self.assertCountEqual(requested, ["0", "1", "2"])
+        self.assertCountEqual(pages, urls[1:3])
+        self.assertEqual(set(crawler.failed_urls), {urls[0]})
+        error = crawler.failed_urls[urls[0]]
+        self.assertIsInstance(error, ClientResponseError)
+        self.assertEqual(error.status, 500)
+
+    async def test_crawl_uses_one_budget_across_levels(self) -> None:
+        async def linked_page(_request: web.Request) -> web.Response:
+            return web.Response(text='<a href="/ok">Next page</a>', content_type="text/html")
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/start", linked_page)
+
+        async with server:
+            start = str(server.make_url("/start"))
+            pages = await crawler.crawl([start], max_pages=1)
+
+        self.assertEqual(list(pages), [start])
+
+    async def test_crawl_skips_requests_at_zero_budget(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        with patch.object(crawler, "fetch_and_parse") as fetch:
+            self.assertEqual(
+                await crawler.crawl(["https://example.com/start"], max_pages=0), {}
+            )
+
+        fetch.assert_not_called()
+
     async def test_crawl_continues_after_http_error(self) -> None:
         crawler = AsyncCrawler()
         self.addAsyncCleanup(crawler.close)
