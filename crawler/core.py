@@ -153,7 +153,8 @@ class AsyncCrawler:
         """Load or reuse the robots.txt rules for the URL's site."""
         if self._closed:
             raise RuntimeError("AsyncCrawler is closed")
-        return await self._robots_cache.get(url)
+        with self._stats.measure():
+            return await self._robots_cache.get(url)
 
     async def _fetch_robots_text(self, url: str) -> str:
         response = await self._fetch_page(url, check_robots=False)
@@ -176,15 +177,16 @@ class AsyncCrawler:
 
     @asynccontextmanager
     async def _track_page(self, url: str) -> AsyncIterator[None]:
-        try:
-            yield
-        except _FETCH_ERRORS as error:
-            self._stats.record_page_failure(
-                url, error, blocked=isinstance(error, RobotsDisallowedError)
-            )
-            raise
-        else:
-            self._stats.processed_pages += 1
+        with self._stats.measure():
+            try:
+                yield
+            except _FETCH_ERRORS as error:
+                self._stats.record_page_failure(
+                    url, error, blocked=isinstance(error, RobotsDisallowedError)
+                )
+                raise
+            else:
+                self._stats.record_page_success(url)
 
     async def _fetch_page(
         self,
@@ -308,7 +310,10 @@ class AsyncCrawler:
                 classified = classify_error(error)
                 error_category = type(classified).__name__ if classified is not None else None
                 self._stats.record_http_result(
-                    attempt_number, duration, error_type=error_category or error_type
+                    attempt_number,
+                    duration,
+                    status_code=status_code,
+                    error_type=error_category or error_type,
                 )
                 logger.warning(
                     "Failed to fetch %s (%s)",
@@ -327,7 +332,9 @@ class AsyncCrawler:
                     raise FetchConnectionError(url) from error
                 raise
 
-            self._stats.record_http_result(attempt_number, perf_counter() - started_at)
+            self._stats.record_http_result(
+                attempt_number, perf_counter() - started_at, status_code=status_code
+            )
             logger.info(
                 "Finished fetching %s",
                 url,
@@ -455,19 +462,20 @@ class AsyncCrawler:
                             queue.add_url(link, depth=depth + 1)
                 report_progress()
 
-        async with self._page_write_queue() as write_queue:
-            async for url in self._sitemap_start_urls(sitemap_urls, host_allowed):
-                if should_enqueue(url):
-                    queue.add_url(url)
-            report_progress()
+        with self._stats.measure():
+            async with self._page_write_queue() as write_queue:
+                async for url in self._sitemap_start_urls(sitemap_urls, host_allowed):
+                    if should_enqueue(url):
+                        queue.add_url(url)
+                report_progress()
 
-            while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
-                worker_count = min(
-                    self._max_concurrent, queue.get_stats()["queued"], remaining_pages
-                )
-                async with asyncio.TaskGroup() as workers:
-                    for _ in range(worker_count):
-                        workers.create_task(crawl_level(depth, write_queue))
+                while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
+                    worker_count = min(
+                        self._max_concurrent, queue.get_stats()["queued"], remaining_pages
+                    )
+                    async with asyncio.TaskGroup() as workers:
+                        for _ in range(worker_count):
+                            workers.create_task(crawl_level(depth, write_queue))
 
         self.failed_urls = failures
         return {

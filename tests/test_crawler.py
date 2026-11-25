@@ -1122,6 +1122,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("crawler.core.perf_counter", side_effect=read_clock),
+            patch("crawler.stats.perf_counter", side_effect=read_clock),
             self.assertLogs("crawler.core", level="INFO") as captured,
         ):
             async with server:
@@ -1136,9 +1137,16 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             stats,
             {
                 "http_attempts": 3,
+                "successful_requests": 1,
+                "failed_requests": 2,
+                "status_counts": {"503": 1, "200": 1, "404": 1},
+                "total_pages": 2,
                 "processed_pages": 1,
                 "failed_pages": 1,
                 "blocked_pages": 0,
+                "top_domains": {"127.0.0.1": 1},
+                "elapsed_seconds": 8.5,
+                "pages_per_second": 2 / 8.5,
                 "errors_by_type": {"TransientError": 1, "PermanentError": 1},
                 "successful_retries": 1,
                 "average_retry_duration": 2.5,
@@ -1172,6 +1180,66 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         stats["permanent_errors"].clear()
         self.assertEqual(crawler.get_stats()["errors_by_type"]["TransientError"], 1)
         self.assertIn(missing, crawler.get_stats()["permanent_errors"])
+
+    async def test_final_statistics_match_two_hosts_http_log(self) -> None:
+        flaky_attempts = 0
+
+        async def page(request: web.Request) -> web.Response:
+            nonlocal flaky_attempts
+            if request.path == "/robots.txt":
+                return web.Response(text="User-agent: *\nDisallow: /private")
+            if request.path == "/flaky":
+                flaky_attempts += 1
+                if flaky_attempts == 1:
+                    return web.Response(status=503)
+            return web.Response(text="<p>Page</p>", content_type="text/html")
+
+        server = make_test_server()
+        server.app.router.add_get("/{path:.*}", page)
+        crawler = AsyncCrawler(
+            max_concurrent=2,
+            respect_robots=True,
+            retry_strategy=RetryStrategy(max_retries=1, initial_delay=0),
+        )
+        self.addAsyncCleanup(crawler.close)
+
+        async with server:
+            blocked = str(server.make_url("/private"))
+            flaky = str(server.make_url("/flaky"))
+            other_host = [
+                str(server.make_url(path).with_host("localhost"))
+                for path in ("/other/one", "/other/two")
+            ]
+            with (
+                patch("crawler.stats.perf_counter", side_effect=(10.0, 12.0)),
+                self.assertLogs("crawler.core", level="INFO") as captured,
+            ):
+                async with asyncio.timeout(15):
+                    pages = await crawler.crawl([blocked, flaky, *other_host], max_depth=0)
+
+        self.assertEqual(set(pages), {flaky, *other_host})
+        attempts = [record for record in captured.records if record.event == "fetch_started"]
+        statuses = [
+            record.status_code
+            for record in captured.records
+            if record.event in {"fetch_succeeded", "fetch_failed"}
+        ]
+        self.assertCountEqual(statuses, [200, 200, 200, 200, 200, 503])
+        self.assertNotIn(blocked, [attempt.url for attempt in attempts])
+        self.assertIn(("robots_blocked", blocked), [(r.event, r.url) for r in captured.records])
+
+        stats = crawler.get_stats()
+        self.assertEqual(stats["http_attempts"], len(attempts))
+        self.assertEqual(stats["successful_requests"], 5)
+        self.assertEqual(stats["failed_requests"], 1)
+        self.assertEqual(stats["status_counts"], {"200": 5, "503": 1})
+        self.assertEqual(stats["successful_retries"], 1)
+        self.assertEqual(stats["total_pages"], 4)
+        self.assertEqual(stats["processed_pages"], 3)
+        self.assertEqual(stats["blocked_pages"], 1)
+        self.assertEqual(list(stats["top_domains"].items()), [("localhost", 2), ("127.0.0.1", 1)])
+        self.assertEqual(stats["elapsed_seconds"], 2.0)
+        self.assertEqual(stats["pages_per_second"], 2.0)
 
     async def test_fetch_url_preserves_connection_failure_url_and_cause(self) -> None:
         crawler = AsyncCrawler()
