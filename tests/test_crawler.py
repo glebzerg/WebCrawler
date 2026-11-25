@@ -12,7 +12,14 @@ from aiohttp import (
     web,
 )
 
-from crawler import AsyncCrawler, CrawlProgress, FetchConnectionError, HTMLParser, RateLimiter
+from crawler import (
+    AsyncCrawler,
+    CrawlProgress,
+    FetchConnectionError,
+    HTMLParser,
+    RateLimiter,
+    RobotsUnavailableError,
+)
 from crawler.html_parser import ParsedPage
 from tests.http_server import make_test_server
 
@@ -139,6 +146,60 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second.can_fetch("/first-private", "ScoutBot"))
         self.assertFalse(second.can_fetch("/second-private", "ScoutBot"))
         self.assertEqual(requests, [("first", "ScoutBot/1.0"), ("second", "ScoutBot/1.0")])
+
+    async def test_missing_robots_file_is_cached_as_empty_rules(self) -> None:
+        requests = 0
+
+        async def missing_robots(_request: web.Request) -> web.Response:
+            nonlocal requests
+            requests += 1
+            raise web.HTTPNotFound()
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/robots.txt", missing_robots)
+
+        async with server:
+            page_url = str(server.make_url("/ok"))
+            rules = await crawler.fetch_robots(page_url)
+            self.assertTrue(rules.can_fetch(page_url))
+            self.assertEqual(await crawler.fetch_url(page_url), "Hello from the test server")
+            self.assertIs(rules, await crawler.fetch_robots(page_url))
+
+        self.assertEqual(requests, 1)
+
+    async def test_unavailable_robots_prevents_a_checked_page_request(self) -> None:
+        requests = []
+
+        async def unavailable_robots(request: web.Request) -> web.Response:
+            requests.append(request.path)
+            raise web.HTTPServiceUnavailable()
+
+        async def page(request: web.Request) -> web.Response:
+            requests.append(request.path)
+            return web.Response(text="Page")
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/robots.txt", unavailable_robots)
+        server.app.router.add_get("/checked", page)
+
+        async with server:
+            page_url = str(server.make_url("/checked"))
+            robots_url = str(server.make_url("/robots.txt"))
+            with self.assertRaisesRegex(RobotsUnavailableError, "HTTP 503") as raised:
+                rules = await crawler.fetch_robots(page_url)
+                if rules.can_fetch(page_url):
+                    await crawler.fetch_url(page_url)
+            with self.assertRaises(RobotsUnavailableError):
+                await crawler.fetch_robots(page_url)
+
+        self.assertEqual(raised.exception.url, robots_url)
+        self.assertEqual(raised.exception.status, 503)
+        self.assertIsInstance(raised.exception.__cause__, ClientResponseError)
+        self.assertEqual(requests, ["/robots.txt"])
 
     async def test_fetch_and_parse_uses_final_url_for_relative_links(self) -> None:
         async def redirect(_request: web.Request) -> web.Response:

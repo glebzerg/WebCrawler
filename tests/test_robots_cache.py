@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from crawler.robots_cache import RobotsCache
+from crawler.robots_cache import RobotsCache, RobotsUnavailableError
 
 
 class RobotsCacheTest(unittest.IsolatedAsyncioTestCase):
@@ -32,8 +32,9 @@ class RobotsCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(rules.can_fetch("/private/page"))
         self.assertEqual(requests, ["https://example.com/robots.txt"])
 
-    async def test_failed_download_can_be_retried(self) -> None:
+    async def test_failed_download_is_reused_until_retry_delay_expires(self) -> None:
         attempts = 0
+        now = 0.0
 
         async def fetch_text(_url: str) -> str:
             nonlocal attempts
@@ -42,12 +43,20 @@ class RobotsCacheTest(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError("Temporary failure")
             return "User-agent: *\nDisallow: /private/"
 
-        cache = RobotsCache(fetch_text)
+        cache = RobotsCache(fetch_text, clock=lambda: now)
         self.addAsyncCleanup(cache.close)
 
-        with self.assertRaisesRegex(TimeoutError, "Temporary failure"):
+        with self.assertRaisesRegex(RobotsUnavailableError, "TimeoutError") as raised:
             await cache.get("https://example.com/first")
+        self.assertIsInstance(raised.exception.__cause__, TimeoutError)
+        self.assertEqual(raised.exception.url, "https://example.com/robots.txt")
 
+        now = 29.0
+        with self.assertRaises(RobotsUnavailableError):
+            await cache.get("https://example.com/second")
+        self.assertEqual(attempts, 1)
+
+        now = 30.0
         rules = await cache.get("https://example.com/second")
 
         self.assertFalse(rules.can_fetch("/private/page"))
