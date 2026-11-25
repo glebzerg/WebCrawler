@@ -27,6 +27,7 @@ from .robots_cache import RobotsCache
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
 from .stats import CrawlerStats, CrawlStats
+from .storage import DataStorage
 from .urls import resolve_http_url, url_key
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class AsyncCrawler:
         read_timeout: float = 10.0,
         total_timeout: float | None = 5 * 60,
         retry_strategy: RetryStrategy | None = None,
+        storage: DataStorage | None = None,
     ) -> None:
         if not isinstance(max_redirects, int) or max_redirects < 0:
             raise ValueError("max_redirects must be a non-negative integer")
@@ -111,6 +113,8 @@ class AsyncCrawler:
         self._respect_robots = respect_robots
         self._robots_cache = RobotsCache(self._fetch_robots_text)
         self._stats = CrawlerStats()
+        self._storage = storage
+        self._storage_lock = asyncio.Lock()
         self.failed_urls: dict[str, Exception] = {}
 
     @property
@@ -367,6 +371,7 @@ class AsyncCrawler:
 
         queue = CrawlerQueue[PageRecord]()
         started_at = perf_counter()
+        storage = self._storage
 
         def report_progress() -> None:
             if on_progress is None:
@@ -427,6 +432,12 @@ class AsyncCrawler:
                     report_progress()
                     continue
 
+                if storage is not None:
+                    if self._closed:
+                        raise RuntimeError("AsyncCrawler is closed")
+                    async with self._storage_lock:
+                        await storage.save(page)
+
                 queue.mark_processed(url, page)
                 if max_depth is None or depth < max_depth:
                     for link in page["links"]:
@@ -449,6 +460,14 @@ class AsyncCrawler:
 
     async def close(self) -> None:
         self._closed = True
-        await self._robots_cache.close()
-        if self._session is not None:
-            await self._session.close()
+        try:
+            await self._robots_cache.close()
+        finally:
+            try:
+                if self._session is not None:
+                    await self._session.close()
+            finally:
+                async with self._storage_lock:
+                    if self._storage is not None:
+                        await self._storage.close()
+                        self._storage = None

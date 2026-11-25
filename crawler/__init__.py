@@ -22,6 +22,7 @@ from .robots_cache import RobotsUnavailableError
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
 from .stats import CrawlStats
+from .storage import DataStorage
 
 __all__ = [
     "AsyncCrawler",
@@ -30,6 +31,7 @@ __all__ = [
     "CrawlProgress",
     "CrawlStats",
     "CrawlerQueue",
+    "DataStorage",
     "FetchConnectionError",
     "HTMLParser",
     "NetworkError",

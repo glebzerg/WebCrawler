@@ -18,6 +18,7 @@ from aiohttp import (
 from crawler import (
     AsyncCrawler,
     CrawlProgress,
+    DataStorage,
     FetchConnectionError,
     HTMLParser,
     PageRecord,
@@ -30,6 +31,18 @@ from crawler import (
 )
 from crawler.html_parser import ParsedPage
 from tests.http_server import make_test_server
+
+
+class MemoryStorage(DataStorage):
+    def __init__(self) -> None:
+        self.records: list[PageRecord] = []
+        self.saved_counts_at_close: list[int] = []
+
+    async def save(self, data: PageRecord) -> None:
+        self.records.append(data)
+
+    async def close(self) -> None:
+        self.saved_counts_at_close.append(len(self.records))
 
 
 class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
@@ -783,6 +796,64 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         error = crawler.failed_urls[missing]
         self.assertIsInstance(error, ClientResponseError)
         self.assertEqual(error.status, 404)
+
+    async def test_crawl_saves_only_successful_pages_and_closes_storage_once(self) -> None:
+        storage = MemoryStorage()
+        crawler = AsyncCrawler(storage=storage)
+        self.addAsyncCleanup(crawler.close)
+
+        async with make_test_server() as server:
+            first = str(server.make_url("/ok"))
+            missing = str(server.make_url("/missing"))
+            second = str(server.make_url("/empty"))
+            pages = await crawler.crawl([first, missing, second])
+
+        self.assertEqual(set(pages), {first, second})
+        self.assertEqual(set(crawler.failed_urls), {missing})
+        self.assertEqual(len(storage.records), 2)
+        self.assertEqual({record["url"]: record for record in storage.records}, pages)
+        self.assertEqual(storage.saved_counts_at_close, [])
+
+        await crawler.close()
+        await crawler.close()
+
+        self.assertEqual(storage.saved_counts_at_close, [2])
+
+    async def test_close_waits_for_a_save_in_progress(self) -> None:
+        saving = asyncio.Event()
+        finish_save = asyncio.Event()
+        closing_session = asyncio.Event()
+
+        class SlowStorage(MemoryStorage):
+            async def save(self, data: PageRecord) -> None:
+                saving.set()
+                await finish_save.wait()
+                await super().save(data)
+
+        async def close_session() -> None:
+            closing_session.set()
+
+        storage = SlowStorage()
+        crawler = AsyncCrawler(storage=storage)
+        self.addAsyncCleanup(crawler.close)
+        session = crawler._get_session()
+
+        with patch.object(session, "close", side_effect=close_session):
+            async with make_test_server() as server, asyncio.TaskGroup() as tasks:
+                url = str(server.make_url("/ok"))
+                crawl = tasks.create_task(crawler.crawl([url]))
+                async with asyncio.timeout(15):
+                    await saving.wait()
+                    close = tasks.create_task(crawler.close())
+                    await closing_session.wait()
+                    self.assertEqual(storage.saved_counts_at_close, [])
+                    self.assertFalse(close.done())
+                    finish_save.set()
+                    await close
+                    pages = await crawl
+
+        self.assertEqual(storage.records, [pages[url]])
+        self.assertEqual(storage.saved_counts_at_close, [1])
 
     async def test_fetch_url_raises_http_error_with_status_and_url(self) -> None:
         crawler = AsyncCrawler()
