@@ -18,6 +18,7 @@ from .errors import classify_error
 from .html_parser import HTMLParser, ParsedPage
 from .queue import CrawlerQueue, QueueStats
 from .rate_limiter import RateLimiter
+from .retry import RetryStrategy
 from .robots_cache import RobotsCache
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
@@ -66,6 +67,7 @@ class AsyncCrawler:
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
         total_timeout: float | None = 5 * 60,
+        retry_strategy: RetryStrategy | None = None,
     ) -> None:
         if not isinstance(max_redirects, int) or max_redirects < 0:
             raise ValueError("max_redirects must be a non-negative integer")
@@ -88,6 +90,7 @@ class AsyncCrawler:
             connect=connect_timeout,
             sock_read=read_timeout,
         )
+        self._retry_strategy = retry_strategy
         self._session: ClientSession | None = None
         self._closed = False
         self._user_agent = user_agent
@@ -143,7 +146,7 @@ class AsyncCrawler:
         redirects = 0
 
         while True:
-            body, response_url, location = await self._fetch_once(
+            body, response_url, location = await self._fetch_with_retry(
                 current_url, check_robots=check_robots
             )
             if location is None:
@@ -163,8 +166,18 @@ class AsyncCrawler:
             current_url = target
             redirects += 1
 
-    async def _fetch_once(
+    async def _fetch_with_retry(
         self, url: str, *, check_robots: bool
+    ) -> tuple[str, str, str | None]:
+        async def attempt(timeout: ClientTimeout) -> tuple[str, str, str | None]:
+            return await self._fetch_once(url, check_robots=check_robots, timeout=timeout)
+
+        if self._retry_strategy is None:
+            return await attempt(self._timeout)
+        return await self._retry_strategy.execute_with_timeout(attempt, self._timeout)
+
+    async def _fetch_once(
+        self, url: str, *, check_robots: bool, timeout: ClientTimeout
     ) -> tuple[str, str, str | None]:
         crawl_delay = 0.0
         if self._respect_robots and check_robots:
@@ -197,7 +210,7 @@ class AsyncCrawler:
                 extra={"event": "fetch_started", "url": url},
             )
             try:
-                async with session.get(url, allow_redirects=False) as response:
+                async with session.get(url, allow_redirects=False, timeout=timeout) as response:
                     response.raise_for_status()
                     location = None
                     if response.status in _REDIRECT_STATUSES:

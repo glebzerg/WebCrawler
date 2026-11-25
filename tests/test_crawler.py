@@ -2,12 +2,13 @@ import asyncio
 import socket
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, call, patch
 
 from aiohttp import (
     ClientConnectorError,
     ClientResponse,
     ClientResponseError,
+    ClientTimeout,
     SocketTimeoutError,
     web,
 )
@@ -19,6 +20,7 @@ from crawler import (
     HTMLParser,
     RateLimiter,
     RedirectError,
+    RetryStrategy,
     RobotsDisallowedError,
     RobotsUnavailableError,
 )
@@ -766,6 +768,145 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(raised.exception.status, status)
                     self.assertEqual(raised.exception.request_info.real_url, url)
+
+    async def test_retry_releases_request_slot_and_uses_the_next_timeout(self) -> None:
+        waiting_to_retry = asyncio.Event()
+        resume_retry = asyncio.Event()
+        attempts = 0
+
+        async def flaky_page(_request: web.Request) -> web.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return web.Response(status=503, headers={"Retry-After": "5"})
+            return web.Response(text="Recovered")
+
+        async def wait_before_retry(_delay: float) -> None:
+            waiting_to_retry.set()
+            await resume_retry.wait()
+
+        sleep = AsyncMock(side_effect=wait_before_retry)
+        crawler = AsyncCrawler(
+            max_concurrent=1,
+            max_per_host=1,
+            connect_timeout=2,
+            read_timeout=3,
+            total_timeout=5,
+            retry_strategy=RetryStrategy(max_retries=1, sleep=sleep),
+        )
+        self.addAsyncCleanup(crawler.close)
+        session = crawler._get_session()
+        server = make_test_server()
+        server.app.router.add_get("/flaky", flaky_page)
+
+        with patch.object(session, "get", wraps=session.get) as get:
+            async with server, asyncio.TaskGroup() as tasks:
+                first = tasks.create_task(crawler.fetch_url(str(server.make_url("/flaky"))))
+                async with asyncio.timeout(15):
+                    await waiting_to_retry.wait()
+                    self.assertEqual(crawler.active_requests, 0)
+                    second = await crawler.fetch_url(str(server.make_url("/ok")))
+                    self.assertEqual(second, "Hello from the test server")
+                    self.assertFalse(first.done())
+                    self.assertEqual(attempts, 1)
+
+                    resume_retry.set()
+                    self.assertEqual(await first, "Recovered")
+
+        sleep.assert_awaited_once_with(5.0)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(
+            [request.kwargs["timeout"] for request in get.call_args_list],
+            [
+                ClientTimeout(connect=2, sock_read=3, total=5),
+                ClientTimeout(connect=2, sock_read=3, total=5),
+                ClientTimeout(connect=4, sock_read=6, total=10),
+            ],
+        )
+
+    async def test_cancelling_the_retry_wait_stops_the_page_request(self) -> None:
+        waiting_to_retry = asyncio.Event()
+        attempts = 0
+
+        async def unavailable_page(_request: web.Request) -> web.Response:
+            nonlocal attempts
+            attempts += 1
+            return web.Response(status=503)
+
+        async def wait_before_retry(_delay: float) -> None:
+            waiting_to_retry.set()
+            await asyncio.Future()
+
+        crawler = AsyncCrawler(
+            max_concurrent=1,
+            retry_strategy=RetryStrategy(max_retries=1, sleep=wait_before_retry),
+        )
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/unavailable", unavailable_page)
+
+        async with server, asyncio.TaskGroup() as tasks:
+            fetch = tasks.create_task(crawler.fetch_url(str(server.make_url("/unavailable"))))
+            async with asyncio.timeout(15):
+                await waiting_to_retry.wait()
+                fetch.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await fetch
+                self.assertEqual(crawler.active_requests, 0)
+                self.assertEqual(
+                    await crawler.fetch_url(str(server.make_url("/ok"))),
+                    "Hello from the test server",
+                )
+
+        self.assertEqual(attempts, 1)
+
+    async def test_retry_rechecks_robots_and_pacing_for_the_failed_redirect_hop(self) -> None:
+        now = 0.0
+        starts: list[tuple[str, float]] = []
+        target_attempts = 0
+
+        def read_clock() -> float:
+            return now
+
+        async def advance_clock(delay: float) -> None:
+            nonlocal now
+            now += delay
+
+        async def respond(request: web.Request) -> web.Response:
+            nonlocal target_attempts
+            starts.append((request.path, now))
+            if request.path == "/robots.txt":
+                return web.Response(text="User-agent: *\nCrawl-delay: 2")
+            if request.path == "/start":
+                raise web.HTTPFound("/target")
+            target_attempts += 1
+            if target_attempts == 1:
+                return web.Response(status=503)
+            return web.Response(text="Target")
+
+        limiter = RateLimiter(1, clock=read_clock, sleep=advance_clock)
+        with patch("crawler.core.RateLimiter", return_value=limiter):
+            crawler = AsyncCrawler(
+                max_concurrent=1,
+                requests_per_second=1,
+                respect_robots=True,
+                retry_strategy=RetryStrategy(max_retries=1, initial_delay=0),
+            )
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/{path:.*}", respond)
+
+        with patch.object(crawler, "fetch_robots", wraps=crawler.fetch_robots) as check_rules:
+            async with server:
+                start = str(server.make_url("/start"))
+                target = str(server.make_url("/target"))
+                async with asyncio.timeout(15):
+                    self.assertEqual(await crawler.fetch_url(start), "Target")
+
+        self.assertEqual(check_rules.await_args_list, [call(start), call(target), call(target)])
+        self.assertEqual(
+            starts, [("/robots.txt", 0.0), ("/start", 2.0), ("/target", 4.0), ("/target", 6.0)]
+        )
 
     async def test_fetch_url_preserves_connection_failure_url_and_cause(self) -> None:
         crawler = AsyncCrawler()
