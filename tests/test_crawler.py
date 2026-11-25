@@ -233,6 +233,51 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "max_depth"):
             await crawler.crawl([], max_depth=-1)
 
+    async def test_crawl_filters_hosts_and_patterns_before_enqueuing(self) -> None:
+        requested = []
+
+        async def page_handler(request: web.Request) -> web.Response:
+            requested.append((request.url.host, request.path))
+            html = "<body>Page</body>"
+            if request.path == "/docs/first":
+                external = request.url.with_host("127.0.0.2").with_path("/docs/external")
+                html = (
+                    '<a href="/docs/next">Included</a>'
+                    '<a href="/docs/private/notes">Excluded despite include pattern</a>'
+                    '<a href="/other">Outside the included section</a>'
+                    f'<a href="{external}">Outside the starting hosts</a>'
+                )
+            return web.Response(text=html, content_type="text/html")
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/{path:.*}", page_handler)
+
+        async with server:
+            first = str(server.make_url("/docs/first"))
+            second = str(server.make_url("/docs/second").with_host("localhost"))
+            next_page = str(server.make_url("/docs/next"))
+            excluded_start = str(server.make_url("/docs/private/start"))
+
+            pages = await crawler.crawl(
+                [first, second, excluded_start],
+                same_domain_only=True,
+                include_patterns=["*/docs/*"],
+                exclude_patterns=["*/docs/private/*"],
+            )
+
+        self.assertEqual(list(pages), [first, second, next_page])
+        self.assertEqual(
+            requested,
+            [
+                ("127.0.0.1", "/docs/first"),
+                ("localhost", "/docs/second"),
+                ("127.0.0.1", "/docs/next"),
+            ],
+        )
+        self.assertEqual(crawler.failed_urls, {})
+
     async def test_crawl_continues_after_http_error(self) -> None:
         crawler = AsyncCrawler()
         self.addAsyncCleanup(crawler.close)

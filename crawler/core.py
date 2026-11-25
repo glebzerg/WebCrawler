@@ -1,5 +1,8 @@
 import asyncio
 import logging
+from collections.abc import Sequence
+from fnmatch import fnmatchcase
+from urllib.parse import urlsplit
 
 from aiohttp import (
     ClientConnectionError,
@@ -11,6 +14,7 @@ from aiohttp import (
 
 from .html_parser import HTMLParser, ParsedPage
 from .queue import CrawlerQueue
+from .urls import url_key
 
 logger = logging.getLogger(__name__)
 _FETCH_ERRORS = (ClientError, TimeoutError, UnicodeDecodeError)
@@ -115,15 +119,41 @@ class AsyncCrawler:
         return pages
 
     async def crawl(
-        self, start_urls: list[str], *, max_depth: int | None = None
+        self,
+        start_urls: list[str],
+        *,
+        max_depth: int | None = None,
+        same_domain_only: bool = False,
+        include_patterns: Sequence[str] = (),
+        exclude_patterns: Sequence[str] = (),
     ) -> dict[str, ParsedPage]:
-        """Follow links by depth and return successful pages."""
+        """Follow links by depth and apply glob patterns to candidate URL keys."""
         if max_depth is not None and (not isinstance(max_depth, int) or max_depth < 0):
             raise ValueError("max_depth must be a non-negative integer or None")
 
+        allowed_hosts = (
+            {urlsplit(url).hostname for url in start_urls} - {None}
+            if same_domain_only
+            else None
+        )
+
+        def should_enqueue(url: str) -> bool:
+            if allowed_hosts is not None and urlsplit(url).hostname not in allowed_hosts:
+                return False
+            if not include_patterns and not exclude_patterns:
+                return True
+
+            key = url_key(url)
+            if any(fnmatchcase(key, pattern) for pattern in exclude_patterns):
+                return False
+            return not include_patterns or any(
+                fnmatchcase(key, pattern) for pattern in include_patterns
+            )
+
         queue = CrawlerQueue()
         for url in start_urls:
-            queue.add_url(url)
+            if should_enqueue(url):
+                queue.add_url(url)
 
         failures: dict[str, Exception] = {}
         while True:
@@ -142,7 +172,8 @@ class AsyncCrawler:
             queue.mark_processed(url, page)
             if max_depth is None or depth < max_depth:
                 for link in page["links"]:
-                    queue.add_url(link, depth=depth + 1)
+                    if should_enqueue(link):
+                        queue.add_url(link, depth=depth + 1)
 
         self.failed_urls = failures
         return {
