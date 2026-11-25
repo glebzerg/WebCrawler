@@ -1,3 +1,4 @@
+from .config import CrawlerConfig, StorageConfig, load_config
 from .core import (
     AsyncCrawler,
     CrawlProgress,
@@ -33,6 +34,7 @@ __all__ = [
     "CrawlError",
     "CrawlProgress",
     "CrawlStats",
+    "CrawlerConfig",
     "CrawlerQueue",
     "DataStorage",
     "FetchConnectionError",
@@ -53,7 +55,9 @@ __all__ = [
     "SemaphoreManager",
     "SitemapParser",
     "SQLiteStorage",
+    "StorageConfig",
     "TransientError",
     "classify_error",
+    "load_config",
     "serialize_page",
 ]

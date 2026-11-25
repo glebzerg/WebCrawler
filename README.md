@@ -68,3 +68,26 @@ py -3.12 -m venv .venv
 ```
 
 Локальный сайт задаёт `Crawl-delay: 0.2` и запрещает `/private`. Демо показывает время каждого полученного сервером GET, средний интервал между запросами, запросы в секунду и число заблокированных адресов. Загрузка `robots.txt` входит в статистику HTTP-запросов.
+
+## Конфигурация JSON
+
+`load_config(path)` читает файл в UTF-8 и возвращает проверенный `CrawlerConfig`.
+
+```json
+{
+  "start_urls": ["https://example.com"],
+  "sitemap_urls": ["https://example.com/sitemap.xml"],
+  "same_domain_only": true,
+  "exclude_patterns": ["*/archive/*"],
+  "max_pages": 50,
+  "max_depth": 2,
+  "max_concurrent": 5,
+  "rate_limit": 2,
+  "storage": {"format": "jsonl", "path": "results/pages.jsonl"}
+}
+```
+
+- `start_urls` и `sitemap_urls` принимают массивы абсолютных HTTP(S)-адресов. `include_patterns` и `exclude_patterns` принимают шаблоны адресов, например `*/archive/*`. `same_domain_only` ограничивает обход хостами стартовых адресов и карт.
+- `max_pages` по умолчанию равен 100, `max_concurrent` — 10. `max_depth` и `max_per_host` принимают `null`, если отдельный лимит не задан. `rate_limit` задаёт запросы в секунду, а `null` отключает этот лимит. `per_domain` включает отдельный лимит для каждого хоста.
+- `respect_robots` по умолчанию равен `true`. Паузы `min_delay` и `jitter`, а также `connect_timeout`, `read_timeout` и `total_timeout` задаются в секундах. `max_redirects` и `max_retries` ограничивают редиректы и повторы HTTP-запросов.
+- `storage` принимает `null` или объект с `path` и форматом `json`, `jsonl`, `csv` или `sqlite`. Для CSV можно указать `encoding`, для SQLite — `batch_size`. Относительный путь считается от рабочей папки запуска. `storage_queue_size` и `storage_max_retries` управляют очередью записи и числом повторов.
