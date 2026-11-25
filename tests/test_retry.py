@@ -1,12 +1,20 @@
 import unittest
 from datetime import UTC, datetime
+from functools import partial
 from unittest.mock import AsyncMock, call, patch
 
-from aiohttp import ClientResponseError, RequestInfo
+from aiohttp import ClientResponseError, ClientTimeout, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
-from crawler import BackoffPolicy, NetworkError, PermanentError, RetryStrategy, classify_error
+from crawler import (
+    BackoffPolicy,
+    NetworkError,
+    PermanentError,
+    RetryStrategy,
+    RetryTimeoutPolicy,
+    classify_error,
+)
 
 
 def http_error(status: int, retry_after: str | None) -> ClientResponseError:
@@ -32,6 +40,25 @@ class BackoffPolicyTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "retry_number"):
             BackoffPolicy().delay_for(0)
+
+
+class RetryTimeoutPolicyTest(unittest.TestCase):
+    def test_preserves_disabled_limits_and_other_timeout_settings(self) -> None:
+        base = ClientTimeout(total=None, connect=0, sock_read=2, sock_connect=4, ceil_threshold=7)
+        policy = RetryTimeoutPolicy(factor=2.0, max_multiplier=3.0)
+
+        self.assertEqual(
+            policy.for_attempt(base, 10_000),
+            ClientTimeout(total=None, connect=0, sock_read=6, sock_connect=4, ceil_threshold=7),
+        )
+
+    def test_invalid_policy_or_attempt_number_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "factor"):
+            RetryTimeoutPolicy(factor=0.5)
+        with self.assertRaisesRegex(ValueError, "max_multiplier"):
+            RetryTimeoutPolicy(max_multiplier=float("inf"))
+        with self.assertRaisesRegex(ValueError, "attempt_number"):
+            RetryTimeoutPolicy().for_attempt(ClientTimeout(), 0)
 
 
 class RetryStrategyTest(unittest.IsolatedAsyncioTestCase):
@@ -177,6 +204,38 @@ class RetryStrategyTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(raised.exception, error)
         load.assert_awaited_once()
         sleep.assert_not_awaited()
+
+    async def test_timeout_grows_to_the_cap_and_resets_for_the_next_url(self) -> None:
+        first_url = "https://example.com/first"
+        next_url = "https://example.com/next"
+        attempts: list[tuple[str, ClientTimeout]] = []
+
+        async def load(url: str, timeout: ClientTimeout) -> str:
+            attempts.append((url, timeout))
+            if url == first_url and len(attempts) < 3:
+                raise TimeoutError("Read timed out")
+            return url
+
+        base = ClientTimeout(connect=2, sock_read=3, total=5)
+        strategy = RetryStrategy(
+            max_retries=2,
+            timeout_policy=RetryTimeoutPolicy(factor=2.0, max_multiplier=3.0),
+            sleep=AsyncMock(),
+        )
+
+        first_result = await strategy.execute_with_timeout(partial(load, first_url), base)
+        next_result = await strategy.execute_with_timeout(partial(load, next_url), base)
+
+        self.assertEqual((first_result, next_result), (first_url, next_url))
+        self.assertEqual(
+            attempts,
+            [
+                (first_url, ClientTimeout(connect=2, sock_read=3, total=5)),
+                (first_url, ClientTimeout(connect=4, sock_read=6, total=10)),
+                (first_url, ClientTimeout(connect=6, sock_read=9, total=15)),
+                (next_url, ClientTimeout(connect=2, sock_read=3, total=5)),
+            ],
+        )
 
     def test_negative_retry_budget_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_retries"):

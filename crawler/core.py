@@ -65,6 +65,7 @@ class AsyncCrawler:
         max_redirects: int = 10,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
+        total_timeout: float | None = 5 * 60,
     ) -> None:
         if not isinstance(max_redirects, int) or max_redirects < 0:
             raise ValueError("max_redirects must be a non-negative integer")
@@ -83,7 +84,7 @@ class AsyncCrawler:
             else None
         )
         self._timeout = ClientTimeout(
-            total=5 * 60,
+            total=total_timeout,
             connect=connect_timeout,
             sock_read=read_timeout,
         )

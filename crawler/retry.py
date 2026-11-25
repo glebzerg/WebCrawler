@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientTimeout
 from aiohttp.hdrs import RETRY_AFTER
 
 from .errors import NetworkError, TransientError, classify_error
@@ -65,6 +65,43 @@ class BackoffPolicy:
         return min(delay, self.max_delay)
 
 
+@dataclass(frozen=True)
+class RetryTimeoutPolicy:
+    factor: float = 2.0
+    max_multiplier: float = 3.0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.factor) or self.factor < 1:
+            raise ValueError("factor must be finite and at least one")
+        if not math.isfinite(self.max_multiplier) or self.max_multiplier < 1:
+            raise ValueError("max_multiplier must be finite and at least one")
+
+    def for_attempt(self, base: ClientTimeout, attempt_number: int) -> ClientTimeout:
+        """Scale the enabled limits from the original timeout for each attempt."""
+        if not isinstance(attempt_number, int) or attempt_number < 1:
+            raise ValueError("attempt_number must be a positive integer")
+        if attempt_number == 1 or self.factor == 1 or self.max_multiplier == 1:
+            return base
+
+        try:
+            multiplier = min(math.pow(self.factor, attempt_number - 1), self.max_multiplier)
+        except OverflowError:
+            multiplier = self.max_multiplier
+
+        def scale(seconds: float | None) -> float | None:
+            if seconds is None or seconds <= 0:
+                return seconds
+            return seconds * multiplier
+
+        return ClientTimeout(
+            total=scale(base.total),
+            connect=scale(base.connect),
+            sock_read=scale(base.sock_read),
+            sock_connect=base.sock_connect,
+            ceil_threshold=base.ceil_threshold,
+        )
+
+
 class RetryStrategy:
     def __init__(
         self,
@@ -75,6 +112,7 @@ class RetryStrategy:
         backoff_factor: float = 2.0,
         max_delay: float = 30.0,
         backoff_by_error: Mapping[type[Exception], BackoffPolicy] | None = None,
+        timeout_policy: RetryTimeoutPolicy | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not isinstance(max_retries, int) or max_retries < 0:
@@ -84,28 +122,45 @@ class RetryStrategy:
         self._retry_on = (TransientError, NetworkError) if retry_on is None else tuple(retry_on)
         self._default_backoff = BackoffPolicy(initial_delay, backoff_factor, max_delay)
         self._backoff_by_error = dict(backoff_by_error or {})
+        self._timeout_policy = timeout_policy if timeout_policy is not None else RetryTimeoutPolicy()
         self._sleep = sleep
 
     async def execute_with_retry[T, **P](
         self, operation: Callable[P, Awaitable[T]], *args: P.args, **kwargs: P.kwargs
     ) -> T:
         """Call the operation again for each retry and propagate the final failure."""
-        retries_left = self._max_retries
+
+        async def attempt(_number: int) -> T:
+            return await operation(*args, **kwargs)
+
+        return await self._execute_attempts(attempt)
+
+    async def execute_with_timeout[T](
+        self, operation: Callable[[ClientTimeout], Awaitable[T]], base_timeout: ClientTimeout
+    ) -> T:
+        """Pass the effective HTTP timeout to the operation on each attempt."""
+
+        async def attempt(number: int) -> T:
+            return await operation(self._timeout_policy.for_attempt(base_timeout, number))
+
+        return await self._execute_attempts(attempt)
+
+    async def _execute_attempts[T](self, attempt: Callable[[int], Awaitable[T]]) -> T:
+        attempt_number = 1
         while True:
             try:
-                return await operation(*args, **kwargs)
+                return await attempt(attempt_number)
             except Exception as error:
-                if retries_left == 0:
+                if attempt_number > self._max_retries:
                     raise
                 classified = classify_error(error)
                 if not (isinstance(error, self._retry_on) or isinstance(classified, self._retry_on)):
                     raise
-                retries_left -= 1
-                retry_number = self._max_retries - retries_left
-                delay = self._backoff_for(error, classified).delay_for(retry_number)
+                delay = self._backoff_for(error, classified).delay_for(attempt_number)
                 delay = max(delay, _retry_after_delay(error))
                 if delay > 0:
                     await self._sleep(delay)
+                attempt_number += 1
 
     def _backoff_for(
         self, error: Exception, classified: Exception | None

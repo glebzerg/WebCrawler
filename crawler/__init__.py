@@ -16,7 +16,7 @@ from .errors import (
 from .html_parser import HTMLParser
 from .queue import CrawlerQueue
 from .rate_limiter import RateLimiter
-from .retry import BackoffPolicy, RetryStrategy
+from .retry import BackoffPolicy, RetryStrategy, RetryTimeoutPolicy
 from .robots_cache import RobotsUnavailableError
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
@@ -35,6 +35,7 @@ __all__ = [
     "RateLimiter",
     "RedirectError",
     "RetryStrategy",
+    "RetryTimeoutPolicy",
     "RobotsDisallowedError",
     "RobotsParser",
     "RobotsUnavailableError",

@@ -784,14 +784,15 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(cause, ClientConnectorError)
         self.assertIsInstance(cause.os_error, ConnectionRefusedError)
 
-    async def test_session_uses_configured_connection_and_read_timeouts(self) -> None:
-        crawler = AsyncCrawler(connect_timeout=2.0, read_timeout=3.0)
+    async def test_session_uses_configured_timeouts(self) -> None:
+        crawler = AsyncCrawler(connect_timeout=2.0, read_timeout=3.0, total_timeout=8.0)
         self.addAsyncCleanup(crawler.close)
 
         session = crawler._get_session()
 
         self.assertEqual(session.timeout.connect, 2.0)
         self.assertEqual(session.timeout.sock_read, 3.0)
+        self.assertEqual(session.timeout.total, 8.0)
 
     async def test_fetch_url_times_out_on_stalled_body_and_can_fetch_again(self) -> None:
         body_started = asyncio.Event()
