@@ -14,13 +14,13 @@ class QueueStats(TypedDict):
     visited: int
 
 
-class CrawlerQueue:
+class CrawlerQueue[T: ParsedPage]:
     def __init__(self) -> None:
         self._pending: list[tuple[int, int, int, str, str]] = []
         self._arrival_order = count()
         self._in_progress: set[str] = set()
         self.visited_urls: set[str] = set()
-        self.processed_urls: dict[str, ParsedPage | None] = {}
+        self.processed_urls: dict[str, T | None] = {}
         self.failed_urls: dict[str, str] = {}
 
     def add_url(self, url: str, priority: int = 0, *, depth: int = 0) -> None:
@@ -49,7 +49,7 @@ class CrawlerQueue:
         self._in_progress.add(key)
         return url, depth
 
-    def mark_processed(self, url: str, result: ParsedPage | None = None) -> None:
+    def mark_processed(self, url: str, result: T | None = None) -> None:
         key = self._finish(url)
         self.processed_urls[key] = result
 

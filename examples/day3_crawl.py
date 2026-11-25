@@ -7,7 +7,7 @@ import aiofiles.os
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from crawler import AsyncCrawler, CrawlProgress
+from crawler import AsyncCrawler, CrawlProgress, serialize_page
 
 
 PAGES = {
@@ -66,7 +66,7 @@ async def main() -> None:
 
     report = {
         "stats": final_progress,
-        "pages": list(pages.values()),
+        "pages": [serialize_page(page) for page in pages.values()],
         "errors": {url: str(error) for url, error in crawler.failed_urls.items()},
     }
     await aiofiles.os.makedirs(OUTPUT.parent, exist_ok=True)

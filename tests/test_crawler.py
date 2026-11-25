@@ -1,7 +1,9 @@
 import asyncio
+import json
 import socket
 import threading
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, call, patch
 
 from aiohttp import (
@@ -18,11 +20,13 @@ from crawler import (
     CrawlProgress,
     FetchConnectionError,
     HTMLParser,
+    PageRecord,
     RateLimiter,
     RedirectError,
     RetryStrategy,
     RobotsDisallowedError,
     RobotsUnavailableError,
+    serialize_page,
 )
 from crawler.html_parser import ParsedPage
 from tests.http_server import make_test_server
@@ -265,14 +269,16 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([time for _, time in starts], [0.0, 1.0, 2.0])
 
-    async def test_fetch_and_parse_uses_final_url_for_relative_links(self) -> None:
+    async def test_fetch_and_parse_builds_a_page_record_after_redirect(self) -> None:
         async def redirect(_request: web.Request) -> web.Response:
             raise web.HTTPFound("/docs/page.html")
 
         async def final_page(_request: web.Request) -> web.Response:
             return web.Response(
                 text='<title>Docs</title><a href="next.html">Next</a>',
-                content_type="text/html",
+                status=203,
+                content_type="application/xhtml+xml",
+                charset="utf-8",
             )
 
         crawler = AsyncCrawler()
@@ -280,15 +286,33 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         server = make_test_server()
         server.app.router.add_get("/start", redirect)
         server.app.router.add_get("/docs/page.html", final_page)
+        crawled_at = datetime(2026, 7, 1, 12, 34, 56, tzinfo=UTC)
 
         async with server:
             original_url = str(server.make_url("/start"))
             expected_link = str(server.make_url("/docs/next.html"))
-            page = await crawler.fetch_and_parse(original_url)
+            with patch("crawler.core.datetime") as clock:
+                clock.now.return_value = crawled_at
+                page = await crawler.fetch_and_parse(original_url)
+                clock.now.assert_called_once_with(UTC)
 
         self.assertEqual(page["url"], original_url)
         self.assertEqual(page["title"], "Docs")
+        self.assertEqual(page["text"], "Next")
         self.assertEqual(page["links"], [expected_link])
+        self.assertEqual(page["metadata"]["title"], "Docs")
+        self.assertEqual(page["status_code"], 203)
+        self.assertEqual(page["content_type"], "application/xhtml+xml")
+        self.assertEqual(page["crawled_at"], crawled_at)
+
+        serialized = json.loads(json.dumps(serialize_page(page)))
+        self.assertEqual(serialized, {**page, "crawled_at": "2026-07-01T12:34:56+00:00"})
+
+        local_time = datetime.fromisoformat("2026-07-01T15:34:56+03:00")
+        self.assertEqual(
+            serialize_page({**page, "crawled_at": local_time})["crawled_at"],
+            serialized["crawled_at"],
+        )
 
     async def test_redirect_checks_robots_rules_at_the_destination_site(self) -> None:
         requests: list[tuple[str, str]] = []
@@ -628,7 +652,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         server.app.router.add_get("/pages/{name}", page_handler)
         fetch_and_parse = crawler.fetch_and_parse
 
-        async def observe_parse(url: str, *, redirect_filter=None) -> ParsedPage:
+        async def observe_parse(url: str, *, redirect_filter=None) -> PageRecord:
             page = await fetch_and_parse(url, redirect_filter=redirect_filter)
             if url.endswith("/fast"):
                 fast_parsed.set()

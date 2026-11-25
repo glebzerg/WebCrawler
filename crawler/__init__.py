@@ -14,6 +14,7 @@ from .errors import (
     classify_error,
 )
 from .html_parser import HTMLParser
+from .page_record import PageRecord, serialize_page
 from .queue import CrawlerQueue
 from .rate_limiter import RateLimiter
 from .retry import BackoffPolicy, RetryStrategy, RetryTimeoutPolicy
@@ -32,6 +33,7 @@ __all__ = [
     "FetchConnectionError",
     "HTMLParser",
     "NetworkError",
+    "PageRecord",
     "ParseError",
     "PermanentError",
     "RateLimiter",
@@ -44,4 +46,5 @@ __all__ = [
     "SemaphoreManager",
     "TransientError",
     "classify_error",
+    "serialize_page",
 ]

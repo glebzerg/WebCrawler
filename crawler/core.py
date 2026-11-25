@@ -2,6 +2,8 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from fnmatch import fnmatchcase
 from time import perf_counter
 from urllib.parse import urlsplit
@@ -16,7 +18,8 @@ from aiohttp import (
 )
 
 from .errors import classify_error
-from .html_parser import HTMLParser, ParsedPage
+from .html_parser import HTMLParser
+from .page_record import PageRecord
 from .queue import CrawlerQueue, QueueStats
 from .rate_limiter import RateLimiter
 from .retry import RetryStrategy
@@ -33,6 +36,15 @@ _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 class CrawlProgress(QueueStats):
     pages_per_second: float
+
+
+@dataclass(frozen=True)
+class _FetchedResponse:
+    text: str
+    url: str
+    status_code: int
+    content_type: str
+    location: str | None
 
 
 class FetchConnectionError(ClientConnectionError):
@@ -121,8 +133,8 @@ class AsyncCrawler:
 
     async def fetch_url(self, url: str) -> str:
         async with self._track_page(url):
-            text, _ = await self._fetch_page(url)
-        return text
+            response = await self._fetch_page(url)
+        return response.text
 
     async def fetch_robots(self, url: str) -> RobotsParser:
         """Load or reuse the robots.txt rules for the URL's site."""
@@ -131,17 +143,23 @@ class AsyncCrawler:
         return await self._robots_cache.get(url)
 
     async def _fetch_robots_text(self, url: str) -> str:
-        text, _ = await self._fetch_page(url, check_robots=False)
-        return text
+        response = await self._fetch_page(url, check_robots=False)
+        return response.text
 
     async def fetch_and_parse(
         self, url: str, *, redirect_filter: Callable[[str], bool] | None = None
-    ) -> ParsedPage:
+    ) -> PageRecord:
         async with self._track_page(url):
-            html, final_url = await self._fetch_page(url, redirect_filter=redirect_filter)
-            page = await HTMLParser().parse_html(html, final_url)
-            page["url"] = url
-        return page
+            response = await self._fetch_page(url, redirect_filter=redirect_filter)
+            crawled_at = datetime.now(UTC)
+            parsed = await HTMLParser().parse_html(response.text, response.url)
+        return {
+            **parsed,
+            "url": url,
+            "status_code": response.status_code,
+            "content_type": response.content_type,
+            "crawled_at": crawled_at,
+        }
 
     @asynccontextmanager
     async def _track_page(self, url: str) -> AsyncIterator[None]:
@@ -161,27 +179,25 @@ class AsyncCrawler:
         *,
         check_robots: bool = True,
         redirect_filter: Callable[[str], bool] | None = None,
-    ) -> tuple[str, str]:
+    ) -> _FetchedResponse:
         current_url = url
         seen: set[str] = set()
         redirects = 0
 
         while True:
-            body, response_url, location = await self._fetch_with_retry(
-                current_url, check_robots=check_robots
-            )
-            if location is None:
-                return body, response_url
+            response = await self._fetch_with_retry(current_url, check_robots=check_robots)
+            if response.location is None:
+                return response
 
             if redirects >= self._max_redirects:
                 raise RedirectError(url, f"redirect limit of {self._max_redirects} reached")
-            target = resolve_http_url(response_url, location)
+            target = resolve_http_url(response.url, response.location)
             if target is None:
-                raise RedirectError(url, f"invalid redirect target: {location}")
+                raise RedirectError(url, f"invalid redirect target: {response.location}")
             if redirect_filter is not None and not redirect_filter(target):
                 raise RedirectError(url, f"target outside the crawl scope: {target}")
 
-            seen.add(url_key(response_url))
+            seen.add(url_key(response.url))
             if url_key(target) in seen:
                 raise RedirectError(url, f"redirect loop at {target}")
             current_url = target
@@ -189,10 +205,10 @@ class AsyncCrawler:
 
     async def _fetch_with_retry(
         self, url: str, *, check_robots: bool
-    ) -> tuple[str, str, str | None]:
+    ) -> _FetchedResponse:
         attempt_number = 0
 
-        async def attempt(timeout: ClientTimeout) -> tuple[str, str, str | None]:
+        async def attempt(timeout: ClientTimeout) -> _FetchedResponse:
             nonlocal attempt_number
             attempt_number += 1
             return await self._fetch_once(
@@ -224,7 +240,7 @@ class AsyncCrawler:
 
     async def _fetch_once(
         self, url: str, *, check_robots: bool, timeout: ClientTimeout, attempt_number: int
-    ) -> tuple[str, str, str | None]:
+    ) -> _FetchedResponse:
         crawl_delay = 0.0
         if self._respect_robots and check_robots:
             try:
@@ -266,7 +282,13 @@ class AsyncCrawler:
                     if status_code in _REDIRECT_STATUSES:
                         location = response.headers.get("Location") or response.headers.get("URI")
                     text = await response.text() if location is None else ""
-                    response_url = str(response.url)
+                    fetched = _FetchedResponse(
+                        text=text,
+                        url=str(response.url),
+                        status_code=status_code,
+                        content_type=response.content_type,
+                        location=location,
+                    )
             except Exception as error:
                 duration = perf_counter() - started_at
                 error_type = type(error).__name__
@@ -303,7 +325,7 @@ class AsyncCrawler:
                     "status_code": status_code,
                 },
             )
-            return text, response_url, location
+            return fetched
 
     async def fetch_urls(self, urls: list[str]) -> dict[str, str]:
         """Fetch each unique URL and record failures for the completed batch."""
@@ -336,14 +358,14 @@ class AsyncCrawler:
         include_patterns: Sequence[str] = (),
         exclude_patterns: Sequence[str] = (),
         on_progress: Callable[[CrawlProgress], None] | None = None,
-    ) -> dict[str, ParsedPage]:
+    ) -> dict[str, PageRecord]:
         """Follow eligible links by depth until the page budget is used or the queue is empty."""
         if not isinstance(max_pages, int) or max_pages < 0:
             raise ValueError("max_pages must be a non-negative integer")
         if max_depth is not None and (not isinstance(max_depth, int) or max_depth < 0):
             raise ValueError("max_depth must be a non-negative integer or None")
 
-        queue = CrawlerQueue()
+        queue = CrawlerQueue[PageRecord]()
         started_at = perf_counter()
 
         def report_progress() -> None:
