@@ -1,3 +1,4 @@
+import csv
 import json
 import unittest
 from pathlib import Path
@@ -6,7 +7,7 @@ from tempfile import TemporaryDirectory
 import aiofiles
 from aiohttp import web
 
-from crawler import AsyncCrawler, JSONLStorage, JSONStorage, serialize_page
+from crawler import AsyncCrawler, CSVStorage, JSONLStorage, JSONStorage, PageRecord, serialize_page
 from tests.http_server import make_test_server
 
 
@@ -98,3 +99,62 @@ class JSONLStorageTest(unittest.IsolatedAsyncioTestCase):
             await storage.close()
 
             self.assertEqual(path.read_bytes(), b"")
+
+
+class CSVStorageTest(unittest.IsolatedAsyncioTestCase):
+    async def test_crawl_preserves_csv_fields_in_utf8_and_cp1251(self) -> None:
+        page_text = 'Первая строка, "цитата"\nВторая строка'
+
+        async def local_page(request: web.Request) -> web.Response:
+            number = request.match_info["number"]
+            html = (
+                f"<title>Страница {number}</title><pre>{page_text}</pre>"
+                '<a href="/reference">Дальше</a>'
+            )
+            return web.Response(text=html, content_type="text/html")
+
+        server = make_test_server()
+        server.app.router.add_get("/pages/{number}", local_page)
+
+        with TemporaryDirectory() as directory:
+            async with server:
+                urls = [str(server.make_url(f"/pages/{number}")) for number in (1, 2)]
+                link = str(server.make_url("/reference"))
+                for encoding_options in ({}, {"encoding": "cp1251"}):
+                    encoding = encoding_options.get("encoding", "utf-8")
+                    with self.subTest(encoding=encoding):
+                        path = Path(directory) / "results" / f"pages-{encoding}.csv"
+                        storage = CSVStorage(path, **encoding_options)
+                        crawler = AsyncCrawler(max_concurrent=1, storage=storage)
+                        try:
+                            pages = await crawler.crawl(urls, max_depth=0)
+                        finally:
+                            await crawler.close()
+                        await storage.close()
+
+                        with path.open(encoding=encoding, newline="") as file:
+                            reader = csv.DictReader(file)
+                            saved = list(reader)
+                            self.assertEqual(reader.fieldnames, list(PageRecord.__annotations__))
+
+                        self.assertEqual([row["url"] for row in saved], urls)
+                        for number, row in enumerate(saved, start=1):
+                            page = serialize_page(pages[row["url"]])
+                            self.assertEqual(row["title"], f"Страница {number}")
+                            self.assertEqual(row["text"], f"{page_text} Дальше")
+                            self.assertEqual(json.loads(row["links"]), [link])
+                            self.assertEqual(int(row["status_code"]), page["status_code"])
+                            self.assertEqual(row["crawled_at"], page["crawled_at"])
+                            for key in ("images", "headings", "lists", "tables", "metadata"):
+                                self.assertEqual(json.loads(row[key]), page[key])
+
+    async def test_closing_without_records_writes_the_header_only(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "empty.csv"
+            storage = CSVStorage(path)
+
+            await storage.close()
+            await storage.close()
+
+            with path.open(encoding="utf-8", newline="") as file:
+                self.assertEqual(list(csv.reader(file)), [list(PageRecord.__annotations__)])
