@@ -1,7 +1,8 @@
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from fnmatch import fnmatchcase
+from time import perf_counter
 from urllib.parse import urlsplit
 
 from aiohttp import (
@@ -13,12 +14,16 @@ from aiohttp import (
 )
 
 from .html_parser import HTMLParser, ParsedPage
-from .queue import CrawlerQueue
+from .queue import CrawlerQueue, QueueStats
 from .semaphore_manager import SemaphoreManager
 from .urls import url_key
 
 logger = logging.getLogger(__name__)
 _FETCH_ERRORS = (ClientError, TimeoutError, UnicodeDecodeError)
+
+
+class CrawlProgress(QueueStats):
+    pages_per_second: float
 
 
 class FetchConnectionError(ClientConnectionError):
@@ -136,14 +141,29 @@ class AsyncCrawler:
         same_domain_only: bool = False,
         include_patterns: Sequence[str] = (),
         exclude_patterns: Sequence[str] = (),
+        on_progress: Callable[[CrawlProgress], None] | None = None,
     ) -> dict[str, ParsedPage]:
         """Follow eligible links by depth until the page budget is used or the queue is empty."""
         if not isinstance(max_pages, int) or max_pages < 0:
             raise ValueError("max_pages must be a non-negative integer")
         if max_depth is not None and (not isinstance(max_depth, int) or max_depth < 0):
             raise ValueError("max_depth must be a non-negative integer or None")
+
+        queue = CrawlerQueue()
+        started_at = perf_counter()
+
+        def report_progress() -> None:
+            if on_progress is None:
+                return
+            stats = queue.get_stats()
+            elapsed = perf_counter() - started_at
+            completed = stats["processed"] + stats["failed"]
+            rate = completed / elapsed if elapsed > 0 else 0.0
+            on_progress({**stats, "pages_per_second": rate})
+
         if max_pages == 0:
             self.failed_urls = {}
+            report_progress()
             return {}
 
         allowed_hosts = (
@@ -165,10 +185,10 @@ class AsyncCrawler:
                 fnmatchcase(key, pattern) for pattern in include_patterns
             )
 
-        queue = CrawlerQueue()
         for url in start_urls:
             if should_enqueue(url):
                 queue.add_url(url)
+        report_progress()
 
         failures: dict[str, Exception] = {}
         remaining_pages = max_pages
@@ -188,6 +208,7 @@ class AsyncCrawler:
                 except _FETCH_ERRORS as error:
                     queue.mark_failed(url, str(error))
                     failures[url] = error
+                    report_progress()
                     continue
 
                 queue.mark_processed(url, page)
@@ -195,6 +216,7 @@ class AsyncCrawler:
                     for link in page["links"]:
                         if should_enqueue(link):
                             queue.add_url(link, depth=depth + 1)
+                report_progress()
 
         while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
             worker_count = min(

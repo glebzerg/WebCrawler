@@ -1,8 +1,17 @@
 from heapq import heappop, heappush
 from itertools import count
+from typing import TypedDict
 
 from .html_parser import ParsedPage
 from .urls import url_key
+
+
+class QueueStats(TypedDict):
+    queued: int
+    in_progress: int
+    processed: int
+    failed: int
+    visited: int
 
 
 class CrawlerQueue:
@@ -48,7 +57,7 @@ class CrawlerQueue:
         key = self._finish(url)
         self.failed_urls[key] = error
 
-    def get_stats(self) -> dict[str, int]:
+    def get_stats(self) -> QueueStats:
         return {
             "queued": len(self._pending),
             "in_progress": len(self._in_progress),

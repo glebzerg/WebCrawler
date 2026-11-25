@@ -12,7 +12,7 @@ from aiohttp import (
     web,
 )
 
-from crawler import AsyncCrawler, FetchConnectionError, HTMLParser
+from crawler import AsyncCrawler, CrawlProgress, FetchConnectionError, HTMLParser
 from crawler.html_parser import ParsedPage
 from tests.http_server import make_test_server
 
@@ -388,6 +388,37 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             )
 
         fetch.assert_not_called()
+
+    async def test_crawl_reports_progress_after_successes_and_failures(self) -> None:
+        async def linked_page(_request: web.Request) -> web.Response:
+            html = '<a href="/missing">Missing</a><a href="/ok">Available</a>'
+            return web.Response(text=html, content_type="text/html")
+
+        snapshots: list[CrawlProgress] = []
+        crawler = AsyncCrawler(max_concurrent=1)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/start", linked_page)
+
+        async with server:
+            start = str(server.make_url("/start"))
+            pages = await crawler.crawl([start], on_progress=snapshots.append)
+
+        self.assertEqual(len(snapshots), 4)
+        self.assertEqual(
+            [
+                (snapshot["processed"], snapshot["queued"], snapshot["failed"])
+                for snapshot in snapshots
+            ],
+            [(0, 1, 0), (1, 2, 0), (1, 1, 1), (2, 0, 1)],
+        )
+        final = snapshots[-1]
+        self.assertEqual(final["processed"], len(pages))
+        self.assertEqual(final["failed"], len(crawler.failed_urls))
+        self.assertEqual(final["visited"], 3)
+        self.assertEqual(final["in_progress"], 0)
+        self.assertEqual(snapshots[0]["pages_per_second"], 0.0)
+        self.assertGreater(final["pages_per_second"], 0.0)
 
     async def test_crawl_continues_after_http_error(self) -> None:
         crawler = AsyncCrawler()
