@@ -98,6 +98,48 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "ScoutBot/1.0")
 
+    async def test_fetch_robots_shares_one_request_per_site_and_separates_ports(self) -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        requests: list[tuple[str, str]] = []
+
+        async def first_robots(request: web.Request) -> web.Response:
+            requests.append(("first", request.headers["User-Agent"]))
+            first_started.set()
+            await release_first.wait()
+            return web.Response(text="User-agent: ScoutBot\nDisallow: /first-private")
+
+        async def second_robots(request: web.Request) -> web.Response:
+            requests.append(("second", request.headers["User-Agent"]))
+            return web.Response(text="User-agent: ScoutBot\nDisallow: /second-private")
+
+        crawler = AsyncCrawler(user_agent="ScoutBot/1.0")
+        self.addAsyncCleanup(crawler.close)
+        first_server = make_test_server()
+        second_server = make_test_server()
+        first_server.app.router.add_get("/robots.txt", first_robots)
+        second_server.app.router.add_get("/robots.txt", second_robots)
+
+        async with first_server, second_server:
+            urls = [str(first_server.make_url(f"/page/{number}")) for number in range(5)]
+            first_loads = asyncio.gather(*(crawler.fetch_robots(url) for url in urls))
+            try:
+                await asyncio.wait_for(first_started.wait(), timeout=15)
+                second = await asyncio.wait_for(
+                    crawler.fetch_robots(str(second_server.make_url("/page/1"))), timeout=15
+                )
+            finally:
+                release_first.set()
+                first_rules = await asyncio.wait_for(first_loads, timeout=15)
+            cached = await crawler.fetch_robots(str(first_server.make_url("/another-page")))
+
+        self.assertTrue(all(rules is cached for rules in first_rules))
+        self.assertIsNot(cached, second)
+        self.assertFalse(cached.can_fetch("/first-private", "ScoutBot"))
+        self.assertTrue(second.can_fetch("/first-private", "ScoutBot"))
+        self.assertFalse(second.can_fetch("/second-private", "ScoutBot"))
+        self.assertEqual(requests, [("first", "ScoutBot/1.0"), ("second", "ScoutBot/1.0")])
+
     async def test_fetch_and_parse_uses_final_url_for_relative_links(self) -> None:
         async def redirect(_request: web.Request) -> web.Response:
             raise web.HTTPFound("/docs/page.html")

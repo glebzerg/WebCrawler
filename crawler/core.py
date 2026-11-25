@@ -16,6 +16,8 @@ from aiohttp import (
 from .html_parser import HTMLParser, ParsedPage
 from .queue import CrawlerQueue, QueueStats
 from .rate_limiter import RateLimiter
+from .robots_cache import RobotsCache
+from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
 from .urls import url_key
 
@@ -67,6 +69,7 @@ class AsyncCrawler:
         self._session: ClientSession | None = None
         self._closed = False
         self._user_agent = user_agent
+        self._robots_cache = RobotsCache(self._fetch_robots_text)
         self.failed_urls: dict[str, Exception] = {}
 
     @property
@@ -84,6 +87,16 @@ class AsyncCrawler:
         return self._session
 
     async def fetch_url(self, url: str) -> str:
+        text, _ = await self._fetch_page(url)
+        return text
+
+    async def fetch_robots(self, url: str) -> RobotsParser:
+        """Load or reuse the robots.txt rules for the URL's site."""
+        if self._closed:
+            raise RuntimeError("AsyncCrawler is closed")
+        return await self._robots_cache.get(url)
+
+    async def _fetch_robots_text(self, url: str) -> str:
         text, _ = await self._fetch_page(url)
         return text
 
@@ -254,5 +267,6 @@ class AsyncCrawler:
 
     async def close(self) -> None:
         self._closed = True
+        await self._robots_cache.close()
         if self._session is not None:
             await self._session.close()
