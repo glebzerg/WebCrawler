@@ -21,6 +21,7 @@ from .retry import BackoffPolicy, RetryStrategy, RetryTimeoutPolicy
 from .robots_cache import RobotsUnavailableError
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
+from .sitemap_parser import SitemapParser
 from .sqlite_storage import SQLiteStorage
 from .stats import CrawlStats
 from .storage import CSVStorage, DataStorage, JSONLStorage, JSONStorage
@@ -50,6 +51,7 @@ __all__ = [
     "RobotsParser",
     "RobotsUnavailableError",
     "SemaphoreManager",
+    "SitemapParser",
     "SQLiteStorage",
     "TransientError",
     "classify_error",

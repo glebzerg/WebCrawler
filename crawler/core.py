@@ -17,7 +17,7 @@ from aiohttp import (
     InvalidURL,
 )
 
-from .errors import classify_error
+from .errors import ParseError, classify_error
 from .html_parser import HTMLParser
 from .page_record import PageRecord
 from .queue import CrawlerQueue, QueueStats
@@ -26,6 +26,7 @@ from .retry import RetryStrategy
 from .robots_cache import RobotsCache
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
+from .sitemap_parser import SitemapParser
 from .stats import CrawlerStats, CrawlStats
 from .storage import DataStorage, StorageRecoveryError
 from .urls import resolve_http_url, url_key
@@ -362,9 +363,10 @@ class AsyncCrawler:
 
     async def crawl(
         self,
-        start_urls: list[str],
+        start_urls: Sequence[str] = (),
         max_pages: int = 100,
         *,
+        sitemap_urls: Sequence[str] = (),
         max_depth: int | None = None,
         same_domain_only: bool = False,
         include_patterns: Sequence[str] = (),
@@ -395,13 +397,16 @@ class AsyncCrawler:
             return {}
 
         allowed_hosts = (
-            {urlsplit(url).hostname for url in start_urls} - {None}
+            {urlsplit(url).hostname for url in (*start_urls, *sitemap_urls)} - {None}
             if same_domain_only
             else None
         )
 
+        def host_allowed(url: str) -> bool:
+            return allowed_hosts is None or urlsplit(url).hostname in allowed_hosts
+
         def should_enqueue(url: str) -> bool:
-            if allowed_hosts is not None and urlsplit(url).hostname not in allowed_hosts:
+            if not host_allowed(url):
                 return False
             if not include_patterns and not exclude_patterns:
                 return True
@@ -416,7 +421,6 @@ class AsyncCrawler:
         for url in start_urls:
             if should_enqueue(url):
                 queue.add_url(url)
-        report_progress()
 
         failures: dict[str, Exception] = {}
         remaining_pages = max_pages
@@ -452,6 +456,11 @@ class AsyncCrawler:
                 report_progress()
 
         async with self._page_write_queue() as write_queue:
+            async for url in self._sitemap_start_urls(sitemap_urls, host_allowed):
+                if should_enqueue(url):
+                    queue.add_url(url)
+            report_progress()
+
             while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
                 worker_count = min(
                     self._max_concurrent, queue.get_stats()["queued"], remaining_pages
@@ -464,6 +473,28 @@ class AsyncCrawler:
         return {
             page["url"]: page for page in queue.processed_urls.values() if page is not None
         }
+
+    async def _sitemap_start_urls(
+        self, sitemap_urls: Sequence[str], host_allowed: Callable[[str], bool]
+    ) -> AsyncIterator[str]:
+        async def fetch_text(url: str) -> str:
+            response = await self._fetch_page(url, redirect_filter=host_allowed)
+            return response.text
+
+        parser = SitemapParser(fetch_text)
+        for sitemap_url in dict.fromkeys(sitemap_urls):
+            try:
+                urls = await parser.fetch_sitemap(sitemap_url)
+            except (*_FETCH_ERRORS, ParseError) as error:
+                logger.warning(
+                    "Skipping sitemap %s: %s",
+                    sitemap_url,
+                    error,
+                    extra={"event": "sitemap_failed", "url": sitemap_url},
+                )
+                continue
+            for url in urls:
+                yield url
 
     @asynccontextmanager
     async def _page_write_queue(
