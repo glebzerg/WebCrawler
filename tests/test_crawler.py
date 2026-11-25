@@ -248,6 +248,11 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pages, {first: "Page", second: "Page"})
         self.assertEqual(set(crawler.failed_urls), {private})
         self.assertIsInstance(crawler.failed_urls[private], RobotsDisallowedError)
+        stats = crawler.get_stats()
+        self.assertEqual(stats["http_attempts"], 3)
+        self.assertEqual(stats["processed_pages"], 2)
+        self.assertEqual(stats["failed_pages"], 0)
+        self.assertEqual(stats["blocked_pages"], 1)
         self.assertTrue(
             any(
                 record.event == "robots_blocked" and record.url == private
@@ -907,6 +912,88 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             starts, [("/robots.txt", 0.0), ("/start", 2.0), ("/target", 4.0), ("/target", 6.0)]
         )
+        stats = crawler.get_stats()
+        self.assertEqual(stats["http_attempts"], 4)
+        self.assertEqual(stats["processed_pages"], 1)
+        self.assertEqual(stats["successful_retries"], 1)
+
+    async def test_crawl_counts_attempts_separately_from_page_results(self) -> None:
+        now = 0.0
+        attempts = 0
+
+        def read_clock() -> float:
+            return now
+
+        async def wait_before_retry(delay: float) -> None:
+            nonlocal now
+            now += delay
+
+        async def flaky_page(_request: web.Request) -> web.Response:
+            nonlocal attempts, now
+            attempts += 1
+            if attempts == 1:
+                now += 1.0
+                return web.Response(status=503, headers={"Retry-After": "5"})
+            now += 2.5
+            return web.Response(text="<h1>Recovered</h1>", content_type="text/html")
+
+        crawler = AsyncCrawler(
+            max_concurrent=1,
+            retry_strategy=RetryStrategy(max_retries=1, sleep=wait_before_retry),
+        )
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/flaky", flaky_page)
+
+        with (
+            patch("crawler.core.perf_counter", side_effect=read_clock),
+            self.assertLogs("crawler.core", level="INFO") as captured,
+        ):
+            async with server:
+                flaky = str(server.make_url("/flaky"))
+                missing = str(server.make_url("/missing"))
+                pages = await crawler.crawl([flaky, missing])
+
+        self.assertEqual(list(pages), [flaky])
+        self.assertEqual(set(crawler.failed_urls), {missing})
+        stats = crawler.get_stats()
+        self.assertEqual(
+            stats,
+            {
+                "http_attempts": 3,
+                "processed_pages": 1,
+                "failed_pages": 1,
+                "blocked_pages": 0,
+                "errors_by_type": {"TransientError": 1, "PermanentError": 1},
+                "successful_retries": 1,
+                "average_retry_duration": 2.5,
+                "permanent_errors": {missing: str(crawler.failed_urls[missing])},
+            },
+        )
+
+        events = [
+            (record.event, record.attempt, getattr(record, "status_code", None))
+            for record in captured.records
+            if record.url == flaky
+        ]
+        self.assertEqual(
+            events,
+            [
+                ("fetch_started", 1, None),
+                ("fetch_failed", 1, 503),
+                ("fetch_retry_scheduled", 2, None),
+                ("fetch_started", 2, None),
+                ("fetch_succeeded", 2, 200),
+            ],
+        )
+        retry = next(record for record in captured.records if record.event == "fetch_retry_scheduled")
+        self.assertEqual(retry.retry_delay, 5.0)
+        self.assertEqual(retry.error_type, "ClientResponseError")
+
+        stats["errors_by_type"].clear()
+        stats["permanent_errors"].clear()
+        self.assertEqual(crawler.get_stats()["errors_by_type"]["TransientError"], 1)
+        self.assertIn(missing, crawler.get_stats()["permanent_errors"])
 
     async def test_fetch_url_preserves_connection_failure_url_and_cause(self) -> None:
         crawler = AsyncCrawler()

@@ -20,12 +20,14 @@ from .retry import BackoffPolicy, RetryStrategy, RetryTimeoutPolicy
 from .robots_cache import RobotsUnavailableError
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
+from .stats import CrawlStats
 
 __all__ = [
     "AsyncCrawler",
     "BackoffPolicy",
     "CrawlError",
     "CrawlProgress",
+    "CrawlStats",
     "CrawlerQueue",
     "FetchConnectionError",
     "HTMLParser",

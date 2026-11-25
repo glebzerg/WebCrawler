@@ -136,16 +136,25 @@ class RetryStrategy:
         return await self._execute_attempts(attempt)
 
     async def execute_with_timeout[T](
-        self, operation: Callable[[ClientTimeout], Awaitable[T]], base_timeout: ClientTimeout
+        self,
+        operation: Callable[[ClientTimeout], Awaitable[T]],
+        base_timeout: ClientTimeout,
+        *,
+        on_retry: Callable[[Exception, float], None] | None = None,
     ) -> T:
-        """Pass the effective HTTP timeout to the operation on each attempt."""
+        """Pass each attempt's timeout and report scheduled retries before waiting."""
 
         async def attempt(number: int) -> T:
             return await operation(self._timeout_policy.for_attempt(base_timeout, number))
 
-        return await self._execute_attempts(attempt)
+        return await self._execute_attempts(attempt, on_retry=on_retry)
 
-    async def _execute_attempts[T](self, attempt: Callable[[int], Awaitable[T]]) -> T:
+    async def _execute_attempts[T](
+        self,
+        attempt: Callable[[int], Awaitable[T]],
+        *,
+        on_retry: Callable[[Exception, float], None] | None = None,
+    ) -> T:
         attempt_number = 1
         while True:
             try:
@@ -158,6 +167,8 @@ class RetryStrategy:
                     raise
                 delay = self._backoff_for(error, classified).delay_for(attempt_number)
                 delay = max(delay, _retry_after_delay(error))
+                if on_retry is not None:
+                    on_retry(error, delay)
                 if delay > 0:
                     await self._sleep(delay)
                 attempt_number += 1

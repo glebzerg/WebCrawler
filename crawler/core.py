@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from fnmatch import fnmatchcase
 from time import perf_counter
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ from .retry import RetryStrategy
 from .robots_cache import RobotsCache
 from .robots_parser import RobotsParser
 from .semaphore_manager import SemaphoreManager
+from .stats import CrawlerStats, CrawlStats
 from .urls import resolve_http_url, url_key
 
 logger = logging.getLogger(__name__)
@@ -96,11 +98,16 @@ class AsyncCrawler:
         self._user_agent = user_agent
         self._respect_robots = respect_robots
         self._robots_cache = RobotsCache(self._fetch_robots_text)
+        self._stats = CrawlerStats()
         self.failed_urls: dict[str, Exception] = {}
 
     @property
     def active_requests(self) -> int:
         return self._semaphores.active_requests
+
+    def get_stats(self) -> CrawlStats:
+        """Return cumulative HTTP and page statistics for this crawler."""
+        return self._stats.snapshot()
 
     def _get_session(self) -> ClientSession:
         if self._closed:
@@ -113,7 +120,8 @@ class AsyncCrawler:
         return self._session
 
     async def fetch_url(self, url: str) -> str:
-        text, _ = await self._fetch_page(url)
+        async with self._track_page(url):
+            text, _ = await self._fetch_page(url)
         return text
 
     async def fetch_robots(self, url: str) -> RobotsParser:
@@ -129,10 +137,23 @@ class AsyncCrawler:
     async def fetch_and_parse(
         self, url: str, *, redirect_filter: Callable[[str], bool] | None = None
     ) -> ParsedPage:
-        html, final_url = await self._fetch_page(url, redirect_filter=redirect_filter)
-        page = await HTMLParser().parse_html(html, final_url)
-        page["url"] = url
+        async with self._track_page(url):
+            html, final_url = await self._fetch_page(url, redirect_filter=redirect_filter)
+            page = await HTMLParser().parse_html(html, final_url)
+            page["url"] = url
         return page
+
+    @asynccontextmanager
+    async def _track_page(self, url: str) -> AsyncIterator[None]:
+        try:
+            yield
+        except _FETCH_ERRORS as error:
+            self._stats.record_page_failure(
+                url, error, blocked=isinstance(error, RobotsDisallowedError)
+            )
+            raise
+        else:
+            self._stats.processed_pages += 1
 
     async def _fetch_page(
         self,
@@ -169,15 +190,40 @@ class AsyncCrawler:
     async def _fetch_with_retry(
         self, url: str, *, check_robots: bool
     ) -> tuple[str, str, str | None]:
+        attempt_number = 0
+
         async def attempt(timeout: ClientTimeout) -> tuple[str, str, str | None]:
-            return await self._fetch_once(url, check_robots=check_robots, timeout=timeout)
+            nonlocal attempt_number
+            attempt_number += 1
+            return await self._fetch_once(
+                url, check_robots=check_robots, timeout=timeout, attempt_number=attempt_number
+            )
 
         if self._retry_strategy is None:
             return await attempt(self._timeout)
-        return await self._retry_strategy.execute_with_timeout(attempt, self._timeout)
+
+        def log_retry(error: Exception, delay: float) -> None:
+            next_attempt = attempt_number + 1
+            logger.info(
+                "Retrying %s in %.3f s (attempt %d)",
+                url,
+                delay,
+                next_attempt,
+                extra={
+                    "event": "fetch_retry_scheduled",
+                    "url": url,
+                    "attempt": next_attempt,
+                    "retry_delay": delay,
+                    "error_type": type(error).__name__,
+                },
+            )
+
+        return await self._retry_strategy.execute_with_timeout(
+            attempt, self._timeout, on_retry=log_retry
+        )
 
     async def _fetch_once(
-        self, url: str, *, check_robots: bool, timeout: ClientTimeout
+        self, url: str, *, check_robots: bool, timeout: ClientTimeout, attempt_number: int
     ) -> tuple[str, str, str | None]:
         crawl_delay = 0.0
         if self._respect_robots and check_robots:
@@ -207,19 +253,28 @@ class AsyncCrawler:
             logger.info(
                 "Started fetching %s",
                 url,
-                extra={"event": "fetch_started", "url": url},
+                extra={"event": "fetch_started", "url": url, "attempt": attempt_number},
             )
+            status_code = None
+            self._stats.http_attempts += 1
+            started_at = perf_counter()
             try:
                 async with session.get(url, allow_redirects=False, timeout=timeout) as response:
+                    status_code = response.status
                     response.raise_for_status()
                     location = None
-                    if response.status in _REDIRECT_STATUSES:
+                    if status_code in _REDIRECT_STATUSES:
                         location = response.headers.get("Location") or response.headers.get("URI")
                     text = await response.text() if location is None else ""
                     response_url = str(response.url)
             except Exception as error:
+                duration = perf_counter() - started_at
                 error_type = type(error).__name__
                 classified = classify_error(error)
+                error_category = type(classified).__name__ if classified is not None else None
+                self._stats.record_http_result(
+                    attempt_number, duration, error_type=error_category or error_type
+                )
                 logger.warning(
                     "Failed to fetch %s (%s)",
                     url,
@@ -227,18 +282,26 @@ class AsyncCrawler:
                     extra={
                         "event": "fetch_failed",
                         "url": url,
+                        "attempt": attempt_number,
+                        "status_code": status_code,
                         "error_type": error_type,
-                        "error_category": type(classified).__name__ if classified is not None else None,
+                        "error_category": error_category,
                     },
                 )
                 if isinstance(error, ClientConnectorError):
                     raise FetchConnectionError(url) from error
                 raise
 
+            self._stats.record_http_result(attempt_number, perf_counter() - started_at)
             logger.info(
                 "Finished fetching %s",
                 url,
-                extra={"event": "fetch_succeeded", "url": url},
+                extra={
+                    "event": "fetch_succeeded",
+                    "url": url,
+                    "attempt": attempt_number,
+                    "status_code": status_code,
+                },
             )
             return text, response_url, location
 
