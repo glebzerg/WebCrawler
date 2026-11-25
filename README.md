@@ -112,3 +112,15 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Запуск из терминала
+
+```powershell
+.\.venv\Scripts\python.exe -m crawler --help
+.\.venv\Scripts\python.exe crawler.py --config config.json --max-pages 2
+.\.venv\Scripts\python.exe -m crawler --urls https://example.com --output results/pages.json
+```
+
+Обе команды используют те же настройки, что и `AdvancedCrawler`. Явно переданный флаг переопределяет соответствующее поле JSON. `--urls` заменяет список `start_urls`, а `--respect-robots` и `--no-respect-robots` задают режим для `robots.txt`.
+
+Если в конфиге указано хранилище, `--output` меняет его путь. При запуске без настроенного хранилища формат определяется по расширению файла. Поддерживаются `.jsonl`, `.csv`, `.db`, `.sqlite` и `.sqlite3`. Для остальных расширений используется JSON.
