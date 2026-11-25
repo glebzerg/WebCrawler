@@ -114,17 +114,23 @@ class AsyncCrawler:
         self.failed_urls = failures
         return pages
 
-    async def crawl(self, start_urls: list[str]) -> dict[str, ParsedPage]:
-        """Follow discovered links one page at a time and return successful pages."""
+    async def crawl(
+        self, start_urls: list[str], *, max_depth: int | None = None
+    ) -> dict[str, ParsedPage]:
+        """Follow links by depth and return successful pages."""
+        if max_depth is not None and (not isinstance(max_depth, int) or max_depth < 0):
+            raise ValueError("max_depth must be a non-negative integer or None")
+
         queue = CrawlerQueue()
         for url in start_urls:
             queue.add_url(url)
 
         failures: dict[str, Exception] = {}
         while True:
-            url = await queue.get_next()
-            if url is None:
+            job = await queue.get_next_job()
+            if job is None:
                 break
+            url, depth = job
 
             try:
                 page = await self.fetch_and_parse(url)
@@ -134,8 +140,9 @@ class AsyncCrawler:
                 continue
 
             queue.mark_processed(url, page)
-            for link in page["links"]:
-                queue.add_url(link)
+            if max_depth is None or depth < max_depth:
+                for link in page["links"]:
+                    queue.add_url(link, depth=depth + 1)
 
         self.failed_urls = failures
         return {

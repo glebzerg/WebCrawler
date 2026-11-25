@@ -7,29 +7,34 @@ from .urls import url_key
 
 class CrawlerQueue:
     def __init__(self) -> None:
-        self._pending: list[tuple[int, int, str, str]] = []
+        self._pending: list[tuple[int, int, int, str, str]] = []
         self._arrival_order = count()
         self._in_progress: set[str] = set()
         self.visited_urls: set[str] = set()
         self.processed_urls: dict[str, ParsedPage | None] = {}
         self.failed_urls: dict[str, str] = {}
 
-    def add_url(self, url: str, priority: int = 0) -> None:
+    def add_url(self, url: str, priority: int = 0, *, depth: int = 0) -> None:
         key = url_key(url)
         if key in self.visited_urls:
             return
 
-        entry = (-priority, next(self._arrival_order), key, url)
+        entry = (depth, -priority, next(self._arrival_order), key, url)
         heappush(self._pending, entry)
         self.visited_urls.add(key)
 
     async def get_next(self) -> str | None:
+        job = await self.get_next_job()
+        return job[0] if job is not None else None
+
+    async def get_next_job(self) -> tuple[str, int] | None:
+        """Take the next URL and its depth, or return None if the queue is empty."""
         if not self._pending:
             return None
 
-        _, _, key, url = heappop(self._pending)
+        depth, _, _, key, url = heappop(self._pending)
         self._in_progress.add(key)
-        return url
+        return url, depth
 
     def mark_processed(self, url: str, result: ParsedPage | None = None) -> None:
         key = self._finish(url)

@@ -21,6 +21,18 @@ class CrawlerQueueTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_next_returns_none_for_an_empty_queue(self) -> None:
         self.assertIsNone(await CrawlerQueue().get_next())
 
+    async def test_queue_compares_depth_before_priority(self) -> None:
+        queue = CrawlerQueue()
+        queue.add_url("https://example.com/deep", priority=100, depth=2)
+        queue.add_url("https://example.com/normal", depth=1)
+        queue.add_url("https://example.com/urgent", priority=10, depth=1)
+        queue.add_url("https://example.com/start")
+
+        self.assertEqual(await queue.get_next_job(), ("https://example.com/start", 0))
+        self.assertEqual(await queue.get_next_job(), ("https://example.com/urgent", 1))
+        self.assertEqual(await queue.get_next_job(), ("https://example.com/normal", 1))
+        self.assertEqual(await queue.get_next_job(), ("https://example.com/deep", 2))
+
     async def test_same_url_key_is_queued_only_once(self) -> None:
         queue = CrawlerQueue()
         first = "HTTPS://Example.COM/a#top"

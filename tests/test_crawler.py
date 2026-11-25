@@ -176,6 +176,63 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         fetch.assert_not_called()
 
+    async def test_crawl_max_depth_zero_fetches_only_start_pages(self) -> None:
+        async def start_page(_request: web.Request) -> web.Response:
+            return web.Response(text='<a href="/ok">Next page</a>', content_type="text/html")
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/start", start_page)
+
+        async with server:
+            start = str(server.make_url("/start"))
+            linked = str(server.make_url("/ok"))
+            pages = await crawler.crawl([start], max_depth=0)
+
+        self.assertEqual(list(pages), [start])
+        self.assertEqual(pages[start]["links"], [linked])
+
+    async def test_crawl_uses_the_shortest_path_when_applying_max_depth(self) -> None:
+        links = {
+            "a": ("b", "c"),
+            "b": ("d",),
+            "c": ("x",),
+            "d": ("x",),
+            "x": ("y",),
+            "y": ("z",),
+            "z": (),
+        }
+        requested = []
+
+        async def linked_page(request: web.Request) -> web.Response:
+            name = request.match_info["name"]
+            requested.append(name)
+            anchors = "".join(
+                f'<a href="/graph/{next_page}">{next_page}</a>' for next_page in links[name]
+            )
+            return web.Response(text=f"<body>{anchors}</body>", content_type="text/html")
+
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/graph/{name}", linked_page)
+
+        async with server:
+            start = str(server.make_url("/graph/a"))
+            next_after_x = str(server.make_url("/graph/y"))
+            pages = await asyncio.wait_for(crawler.crawl([start], max_depth=3), timeout=5)
+
+        self.assertEqual(requested, ["a", "b", "c", "d", "x", "y"])
+        self.assertIn(next_after_x, pages)
+
+    async def test_crawl_rejects_negative_max_depth(self) -> None:
+        crawler = AsyncCrawler()
+        self.addAsyncCleanup(crawler.close)
+
+        with self.assertRaisesRegex(ValueError, "max_depth"):
+            await crawler.crawl([], max_depth=-1)
+
     async def test_crawl_continues_after_http_error(self) -> None:
         crawler = AsyncCrawler()
         self.addAsyncCleanup(crawler.close)
