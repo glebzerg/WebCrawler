@@ -6,6 +6,7 @@ from typing import TypedDict
 from bs4 import BeautifulSoup, Tag
 from bs4.exceptions import ParserRejectedMarkup
 
+from .errors import ParseError
 from .urls import resolve_http_url
 
 
@@ -50,7 +51,13 @@ def _log_parse_warning(url: str, field: str, error: Exception) -> None:
         field,
         url,
         error_type,
-        extra={"event": "html_parse_failed", "url": url, "field": field, "error_type": error_type},
+        extra={
+            "event": "html_parse_failed",
+            "url": url,
+            "field": field,
+            "error_type": error_type,
+            "error_category": ParseError.__name__,
+        },
     )
 
 

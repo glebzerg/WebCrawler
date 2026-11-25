@@ -83,6 +83,7 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(captured.records[-1].error_type, "ClientResponseError")
+        self.assertEqual(captured.records[-1].error_category, "PermanentError")
 
     async def test_fetch_url_returns_empty_string_for_empty_body(self) -> None:
         crawler = AsyncCrawler()

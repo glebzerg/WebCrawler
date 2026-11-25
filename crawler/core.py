@@ -14,6 +14,7 @@ from aiohttp import (
     InvalidURL,
 )
 
+from .errors import classify_error
 from .html_parser import HTMLParser, ParsedPage
 from .queue import CrawlerQueue, QueueStats
 from .rate_limiter import RateLimiter
@@ -204,11 +205,17 @@ class AsyncCrawler:
                     response_url = str(response.url)
             except Exception as error:
                 error_type = type(error).__name__
+                classified = classify_error(error)
                 logger.warning(
                     "Failed to fetch %s (%s)",
                     url,
                     error_type,
-                    extra={"event": "fetch_failed", "url": url, "error_type": error_type},
+                    extra={
+                        "event": "fetch_failed",
+                        "url": url,
+                        "error_type": error_type,
+                        "error_category": type(classified).__name__ if classified is not None else None,
+                    },
                 )
                 if isinstance(error, ClientConnectorError):
                     raise FetchConnectionError(url) from error

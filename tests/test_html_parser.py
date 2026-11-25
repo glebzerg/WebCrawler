@@ -228,6 +228,7 @@ class HTMLParserTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(warning.url, url)
         self.assertEqual(warning.field, "tables")
         self.assertEqual(warning.error_type, "ValueError")
+        self.assertEqual(warning.error_category, "ParseError")
 
     async def test_parse_html_returns_empty_fields_if_markup_is_rejected(self) -> None:
         url = "https://example.com/rejected"
