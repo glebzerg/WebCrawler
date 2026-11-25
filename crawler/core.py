@@ -43,6 +43,7 @@ class AsyncCrawler:
         per_domain: bool = True,
         min_delay: float = 0.0,
         jitter: float = 0.0,
+        user_agent: str = "WebCrawler/0.1",
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
     ) -> None:
@@ -65,6 +66,7 @@ class AsyncCrawler:
         )
         self._session: ClientSession | None = None
         self._closed = False
+        self._user_agent = user_agent
         self.failed_urls: dict[str, Exception] = {}
 
     @property
@@ -76,7 +78,9 @@ class AsyncCrawler:
             raise RuntimeError("AsyncCrawler is closed")
 
         if self._session is None:
-            self._session = ClientSession(timeout=self._timeout)
+            self._session = ClientSession(
+                timeout=self._timeout, headers={"User-Agent": self._user_agent}
+            )
         return self._session
 
     async def fetch_url(self, url: str) -> str:

@@ -84,6 +84,20 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "")
 
+    async def test_fetch_url_sends_configured_user_agent(self) -> None:
+        async def echo_agent(request: web.Request) -> web.Response:
+            return web.Response(text=request.headers["User-Agent"])
+
+        crawler = AsyncCrawler(user_agent="ScoutBot/1.0")
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/agent", echo_agent)
+
+        async with server:
+            text = await crawler.fetch_url(str(server.make_url("/agent")))
+
+        self.assertEqual(text, "ScoutBot/1.0")
+
     async def test_fetch_and_parse_uses_final_url_for_relative_links(self) -> None:
         async def redirect(_request: web.Request) -> web.Response:
             raise web.HTTPFound("/docs/page.html")
