@@ -32,6 +32,27 @@ class RateLimiterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(starts, [0.0, 0.5, 1.0])
         self.assertEqual(clock.delays, [0.5, 0.5])
 
+    async def test_domains_can_share_a_schedule_or_use_separate_ones(self) -> None:
+        for per_domain, expected in (
+            (True, [("a.test", 0.0), ("b.test", 0.0), ("a.test", 0.5)]),
+            (False, [("a.test", 0.0), ("a.test", 0.5), ("b.test", 1.0)]),
+        ):
+            with self.subTest(per_domain=per_domain):
+                clock = FakeClock()
+                limiter = RateLimiter(
+                    2, per_domain=per_domain, clock=clock.read, sleep=clock.sleep
+                )
+                starts = []
+
+                async def record_start(domain: str) -> None:
+                    await limiter.acquire(domain)
+                    starts.append((domain, clock.read()))
+
+                domains = ("a.test", "a.test", "b.test")
+                await asyncio.gather(*(record_start(domain) for domain in domains))
+
+                self.assertEqual(starts, expected)
+
     async def test_idle_time_does_not_accumulate_extra_starts(self) -> None:
         clock = FakeClock()
         limiter = RateLimiter(2, clock=clock.read, sleep=clock.sleep)

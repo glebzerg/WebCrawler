@@ -15,6 +15,7 @@ from aiohttp import (
 
 from .html_parser import HTMLParser, ParsedPage
 from .queue import CrawlerQueue, QueueStats
+from .rate_limiter import RateLimiter
 from .semaphore_manager import SemaphoreManager
 from .urls import url_key
 
@@ -38,11 +39,18 @@ class AsyncCrawler:
         max_concurrent: int = 10,
         *,
         max_per_host: int | None = None,
+        requests_per_second: float | None = None,
+        per_domain: bool = True,
         connect_timeout: float = 5.0,
         read_timeout: float = 10.0,
     ) -> None:
         self._max_concurrent = max_concurrent
         self._semaphores = SemaphoreManager(max_concurrent, max_per_host)
+        self._rate_limiter = (
+            RateLimiter(requests_per_second, per_domain=per_domain)
+            if requests_per_second is not None
+            else None
+        )
         self._timeout = ClientTimeout(
             total=5 * 60,
             connect=connect_timeout,
@@ -82,6 +90,8 @@ class AsyncCrawler:
 
         async with self._semaphores.acquire(host):
             session = self._get_session()
+            if self._rate_limiter is not None:
+                await self._rate_limiter.acquire(host)
             logger.info(
                 "Started fetching %s",
                 url,

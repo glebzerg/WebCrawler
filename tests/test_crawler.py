@@ -12,7 +12,7 @@ from aiohttp import (
     web,
 )
 
-from crawler import AsyncCrawler, CrawlProgress, FetchConnectionError, HTMLParser
+from crawler import AsyncCrawler, CrawlProgress, FetchConnectionError, HTMLParser, RateLimiter
 from crawler.html_parser import ParsedPage
 from tests.http_server import make_test_server
 
@@ -560,6 +560,40 @@ class AsyncCrawlerTest(unittest.IsolatedAsyncioTestCase):
     def test_max_per_host_must_be_positive_when_set(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_per_host"):
             AsyncCrawler(max_per_host=0)
+
+    async def test_request_rate_is_applied_after_waiting_for_a_network_slot(self) -> None:
+        now = 0.0
+        starts: dict[str, float] = {}
+
+        def read_clock() -> float:
+            return now
+
+        async def advance_clock(delay: float) -> None:
+            nonlocal now
+            now += delay
+
+        async def timed_page(request: web.Request) -> web.Response:
+            nonlocal now
+            name = request.match_info["name"]
+            starts[name] = now
+            if name == "slow":
+                now = 2.0
+            return web.Response(text=name)
+
+        limiter = RateLimiter(2, per_domain=False, clock=read_clock, sleep=advance_clock)
+        with patch("crawler.core.RateLimiter", return_value=limiter) as make_limiter:
+            crawler = AsyncCrawler(max_concurrent=1, requests_per_second=2, per_domain=False)
+        make_limiter.assert_called_once_with(2, per_domain=False)
+        self.addAsyncCleanup(crawler.close)
+        server = make_test_server()
+        server.app.router.add_get("/timed/{name}", timed_page)
+
+        async with server:
+            urls = [str(server.make_url(f"/timed/{name}")) for name in ("slow", "two", "three")]
+            pages = await asyncio.wait_for(crawler.fetch_urls(urls), timeout=5)
+
+        self.assertEqual(set(pages), set(urls))
+        self.assertEqual(starts, {"slow": 0.0, "two": 2.0, "three": 2.5})
 
     async def test_fetch_urls_applies_global_and_per_host_limits(self) -> None:
         active_by_host = {"127.0.0.1": 0, "localhost": 0}
