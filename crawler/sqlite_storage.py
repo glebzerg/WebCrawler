@@ -51,8 +51,13 @@ ON CONFLICT(url) DO UPDATE SET
 class SQLiteStorage(DataStorage):
     """Store the latest saved record for each URL in a SQLite database."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, batch_size: int = 1) -> None:
+        if not isinstance(batch_size, int) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+
         self._path = Path(path)
+        self._batch_size = batch_size
+        self._pending_rows: list[dict[str, object]] = []
         self._connection: aiosqlite.Connection | None = None
         self._closed = False
         self._lock = asyncio.Lock()
@@ -66,20 +71,33 @@ class SQLiteStorage(DataStorage):
         row = serialize_table_row(data)
         async with self._lock:
             connection = await self._get_connection()
-            try:
-                async with connection.execute(_UPSERT_PAGE, row):
-                    pass
-                await connection.commit()
-            except BaseException:
-                await connection.rollback()
-                raise
+            if len(self._pending_rows) + 1 < self._batch_size:
+                self._pending_rows.append(row)
+                return
+
+            await self._write_batch(connection, [*self._pending_rows, row])
+            self._pending_rows.clear()
 
     async def close(self) -> None:
         async with self._lock:
             if self._connection is not None:
+                if self._pending_rows:
+                    await self._write_batch(self._connection, self._pending_rows)
+                    self._pending_rows.clear()
                 await self._connection.close()
                 self._connection = None
             self._closed = True
+
+    async def _write_batch(
+        self, connection: aiosqlite.Connection, rows: list[dict[str, object]]
+    ) -> None:
+        try:
+            async with connection.executemany(_UPSERT_PAGE, rows):
+                pass
+            await connection.commit()
+        except BaseException:
+            await connection.rollback()
+            raise
 
     async def _get_connection(self) -> aiosqlite.Connection:
         if self._closed:
