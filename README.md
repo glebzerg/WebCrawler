@@ -107,11 +107,14 @@ async def main():
     finally:
         await crawler.close()
 
+    await crawler.export_to_json("results/stats.json")
     print(crawler.get_stats()["saved_pages"])
 
 
 asyncio.run(main())
 ```
+
+`storage.path` задаёт файл с записями страниц. `export_to_json()` записывает снимок статистики в отдельный файл. Экспорт после `close()` включает итог записи в хранилище.
 
 ## Запуск из терминала
 

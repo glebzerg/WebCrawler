@@ -1,3 +1,5 @@
+import asyncio
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Self
@@ -5,6 +7,7 @@ from typing import Self
 from .config import CrawlerConfig, StorageConfig, load_config
 from .core import AsyncCrawler, CrawlProgress
 from .page_record import PageRecord
+from .reporting import same_destination, write_report
 from .retry import RetryStrategy
 from .sqlite_storage import SQLiteStorage
 from .stats import CrawlStats
@@ -76,6 +79,22 @@ class AdvancedCrawler:
     def get_stats(self) -> CrawlStats:
         """Return the underlying crawler's statistics."""
         return self._crawler.get_stats()
+
+    async def export_to_json(self, filename: str | Path) -> None:
+        """Write a snapshot of the crawl statistics as a JSON report."""
+        stats = self.get_stats()
+        path = await self._report_path(filename)
+        content = json.dumps(stats, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        await write_report(path, content)
+
+    async def _report_path(self, filename: str | Path) -> Path:
+        path = Path(filename)
+        storage = self._config.storage
+        if storage is not None and await asyncio.to_thread(
+            same_destination, path, Path(storage.path)
+        ):
+            raise ValueError("The report and page storage must use different files")
+        return path
 
     async def close(self) -> None:
         """Finish saving and close the crawler's resources."""

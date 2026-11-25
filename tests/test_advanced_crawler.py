@@ -3,10 +3,11 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from aiohttp import web
 
-from crawler import AdvancedCrawler, CrawlProgress, serialize_page
+from crawler import AdvancedCrawler, CrawlProgress, CrawlerConfig, serialize_page
 from tests.http_server import make_test_server
 
 
@@ -40,6 +41,7 @@ class AdvancedCrawlerTest(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
             output = Path(directory) / "results" / "pages.json"
+            report = Path(directory) / "reports" / "stats.json"
             async with server:
                 config = {
                     "start_urls": [str(server.make_url("/docs/private"))],
@@ -67,7 +69,11 @@ class AdvancedCrawlerTest(unittest.IsolatedAsyncioTestCase):
                     str(server.make_url(path)) for path in ("/docs/first", "/docs/second")
                 ]
                 self.assertEqual(list(pages), expected_urls)
+                await crawler.export_to_json(report)
+                with self.assertRaisesRegex(ValueError, "different files"):
+                    await crawler.export_to_json(output)
                 saved = json.loads(output.read_text(encoding="utf-8"))
+                exported_stats = json.loads(report.read_text(encoding="utf-8"))
 
         self.assertEqual(
             [path for path, _ in requests],
@@ -77,6 +83,23 @@ class AdvancedCrawlerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved, [serialize_page(pages[url]) for url in expected_urls])
         self.assertEqual(progress[-1]["processed"], 2)
         stats = crawler.get_stats()
+        self.assertEqual(exported_stats, stats)
         self.assertEqual(stats["saved_pages"], 2)
         self.assertEqual(stats["successful_retries"], 1)
         self.assertEqual(stats["blocked_pages"], 1)
+
+    async def test_failed_report_replacement_preserves_the_existing_file(self) -> None:
+        crawler = AdvancedCrawler(CrawlerConfig())
+        self.addAsyncCleanup(crawler.close)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "stats.json"
+            path.write_text('{"previous": true}', encoding="utf-8")
+
+            with (
+                patch("crawler.reporting.aiofiles.os.replace", side_effect=OSError("report failure")),
+                self.assertRaisesRegex(OSError, "report failure"),
+            ):
+                await crawler.export_to_json(path)
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"previous": True})
+            self.assertEqual(list(path.parent.iterdir()), [path])
