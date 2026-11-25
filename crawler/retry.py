@@ -2,8 +2,33 @@ import asyncio
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+
+from aiohttp import ClientResponseError
+from aiohttp.hdrs import RETRY_AFTER
 
 from .errors import NetworkError, TransientError, classify_error
+
+
+def _retry_after_delay(error: Exception) -> float:
+    """Return the server's minimum delay in seconds, or zero if unavailable."""
+    response_error = error if isinstance(error, ClientResponseError) else error.__cause__
+    if not isinstance(response_error, ClientResponseError) or response_error.headers is None:
+        return 0.0
+
+    value = response_error.headers.get(RETRY_AFTER, "").strip()
+    if value.isascii() and value.isdecimal():
+        seconds = float(value)
+        return seconds if math.isfinite(seconds) else 0.0
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (ValueError, OverflowError):
+        return 0.0
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 @dataclass(frozen=True)
@@ -78,6 +103,7 @@ class RetryStrategy:
                 retries_left -= 1
                 retry_number = self._max_retries - retries_left
                 delay = self._backoff_for(error, classified).delay_for(retry_number)
+                delay = max(delay, _retry_after_delay(error))
                 if delay > 0:
                     await self._sleep(delay)
 
