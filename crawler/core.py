@@ -84,9 +84,12 @@ class AsyncCrawler:
         total_timeout: float | None = 5 * 60,
         retry_strategy: RetryStrategy | None = None,
         storage: DataStorage | None = None,
+        storage_queue_size: int = 10,
     ) -> None:
         if not isinstance(max_redirects, int) or max_redirects < 0:
             raise ValueError("max_redirects must be a non-negative integer")
+        if not isinstance(storage_queue_size, int) or storage_queue_size < 1:
+            raise ValueError("storage_queue_size must be a positive integer")
 
         self._max_concurrent = max_concurrent
         self._max_redirects = max_redirects
@@ -114,6 +117,7 @@ class AsyncCrawler:
         self._robots_cache = RobotsCache(self._fetch_robots_text)
         self._stats = CrawlerStats()
         self._storage = storage
+        self._storage_queue_size = storage_queue_size
         self._storage_lock = asyncio.Lock()
         self.failed_urls: dict[str, Exception] = {}
 
@@ -371,7 +375,6 @@ class AsyncCrawler:
 
         queue = CrawlerQueue[PageRecord]()
         started_at = perf_counter()
-        storage = self._storage
 
         def report_progress() -> None:
             if on_progress is None:
@@ -414,7 +417,9 @@ class AsyncCrawler:
         failures: dict[str, Exception] = {}
         remaining_pages = max_pages
 
-        async def crawl_level(depth: int) -> None:
+        async def crawl_level(
+            depth: int, write_queue: asyncio.Queue[PageRecord | None] | None
+        ) -> None:
             nonlocal remaining_pages
             while remaining_pages > 0:
                 job = await queue.get_next_job(max_depth=depth)
@@ -432,11 +437,8 @@ class AsyncCrawler:
                     report_progress()
                     continue
 
-                if storage is not None:
-                    if self._closed:
-                        raise RuntimeError("AsyncCrawler is closed")
-                    async with self._storage_lock:
-                        await storage.save(page)
+                if write_queue is not None:
+                    await write_queue.put(page)
 
                 queue.mark_processed(url, page)
                 if max_depth is None or depth < max_depth:
@@ -445,29 +447,54 @@ class AsyncCrawler:
                             queue.add_url(link, depth=depth + 1)
                 report_progress()
 
-        while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
-            worker_count = min(
-                self._max_concurrent, queue.get_stats()["queued"], remaining_pages
-            )
-            async with asyncio.TaskGroup() as workers:
-                for _ in range(worker_count):
-                    workers.create_task(crawl_level(depth))
+        async with self._page_write_queue() as write_queue:
+            while remaining_pages > 0 and (depth := queue.next_depth()) is not None:
+                worker_count = min(
+                    self._max_concurrent, queue.get_stats()["queued"], remaining_pages
+                )
+                async with asyncio.TaskGroup() as workers:
+                    for _ in range(worker_count):
+                        workers.create_task(crawl_level(depth, write_queue))
 
         self.failed_urls = failures
         return {
             page["url"]: page for page in queue.processed_urls.values() if page is not None
         }
 
+    @asynccontextmanager
+    async def _page_write_queue(
+        self,
+    ) -> AsyncIterator[asyncio.Queue[PageRecord | None] | None]:
+        storage = self._storage
+        if storage is None:
+            yield None
+            return
+
+        async with self._storage_lock:
+            if self._closed:
+                raise RuntimeError("AsyncCrawler is closed")
+
+            queue = asyncio.Queue[PageRecord | None](maxsize=self._storage_queue_size)
+
+            async def write_pages() -> None:
+                while (page := await queue.get()) is not None:
+                    await storage.save(page)
+
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(write_pages())
+                yield queue
+                await queue.put(None)
+
     async def close(self) -> None:
-        self._closed = True
-        try:
-            await self._robots_cache.close()
-        finally:
+        async with self._storage_lock:
+            self._closed = True
             try:
-                if self._session is not None:
-                    await self._session.close()
+                await self._robots_cache.close()
             finally:
-                async with self._storage_lock:
+                try:
+                    if self._session is not None:
+                        await self._session.close()
+                finally:
                     if self._storage is not None:
                         await self._storage.close()
                         self._storage = None
